@@ -35,11 +35,11 @@ It combines **text extraction (pdfplumber)** and **OCR (pytesseract + PyMuPDF)**
 ## 📜 License
 
 MIT License
+
+
 ---
+### 📄 README.md (Portuguese)
 
-### 📄 README.md (Português)
-
-```markdown
 # Extrator Automático de Notas Fiscais (NF-e)
 
 Este projeto automatiza a extração de informações de **Notas Fiscais eletrônicas em PDF** usando Python.  
