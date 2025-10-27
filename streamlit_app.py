@@ -176,6 +176,12 @@ if uploaded_files:
                         "arquivo": st.column_config.TextColumn("Arquivo", width=150),
                     }
                 )
+                # ========== NOVA SEÇÃO: IA ==========
+
+                st.divider()
+
+                # 🤖 Adicionar seção de IA
+                add_ia_to_streamlit(df_filtrado)
                 
                 st.divider()
                 
