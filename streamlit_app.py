@@ -4,6 +4,13 @@ import os
 from pathlib import Path
 from datetime import datetime
 from extrator import processar_pdfs, exportar_para_excel
+from ia_simples import (
+    classify_expense_hf,
+    detect_anomalies,
+    analyze_supplier_risk,
+    simple_forecast,
+    add_ia_to_streamlit
+)
 
 # =============== CONFIG STREAMLIT ===============
 st.set_page_config(
