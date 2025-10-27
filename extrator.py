@@ -213,7 +213,7 @@ def melhorar_imagem_para_ocr(img: Image.Image) -> Image.Image:
         return img
 
 def extrair_texto_ocr(pdf_path: str, progress_callback=None) -> str:
-    """Extrai texto com EasyOCR"""
+    """Extrai texto com EasyOCR e trata rotação"""
     global EASY_OCR
     
     texto_acumulado = []
@@ -232,12 +232,21 @@ def extrair_texto_ocr(pdf_path: str, progress_callback=None) -> str:
         for page_num in range(doc.page_count):
             try:
                 page = doc.load_page(page_num)
+                
+                # Verificar rotação e corrigir se necessário
+                rotacao = page.rotation
+                if rotacao != 0:
+                    page.set_rotation((360 - rotacao) % 360)
+                
+                # Extrair como imagem com alta resolução
                 mat = fitz.Matrix(3, 3)
                 pix = page.get_pixmap(matrix=mat)
                 img = Image.open(io.BytesIO(pix.tobytes("png")))
                 
+                # Melhorar imagem
                 img = melhorar_imagem_para_ocr(img)
                 
+                # OCR
                 resultado = EASY_OCR.readtext(img)
                 
                 if resultado:
@@ -249,13 +258,15 @@ def extrair_texto_ocr(pdf_path: str, progress_callback=None) -> str:
                             if texto_str and len(texto_str.strip()) > 0 and confianca_val > 0.2:
                                 texto_acumulado.append(texto_str)
                 
-            except:
+            except Exception as e:
+                if DEBUG: print(f"Erro OCR página {page_num + 1}: {e}")
                 continue
         
         doc.close()
         return "\n".join(texto_acumulado)
     
-    except:
+    except Exception as e:
+        if DEBUG: print(f"Erro EasyOCR: {e}")
         return ""
 
 # =============== EXTRAÇÃO DE TEXTO ===============
