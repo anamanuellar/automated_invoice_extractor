@@ -1,7 +1,8 @@
-# extrator.py - Lógica de extração de NFs
+# extrator_corrigido.py - Lógica de extração de NFs (VERSÃO CORRIGIDA)
 import os, io, re, requests, time
 from pathlib import Path
 from datetime import datetime
+from typing import Any
 
 import pdfplumber
 import pandas as pd
@@ -13,16 +14,19 @@ import fitz  # PyMuPDF
 DEBUG = False  # Desabilita debug em produção
 CNPJ_CACHE: dict[str, dict] = {}
 
-# =============== REGEX ===============
+# =============== REGEX (CORRIGIDO) ===============
 RE_MOEDA = re.compile(r"R?\$?\s*(\d{1,3}(?:\.\d{3})*,\d{2})")
 RE_DATA  = re.compile(r"\b\d{2}/\d{2}/\d{4}\b")
 
+# Padrões de número de NF - MAIS FLEXÍVEIS
 RE_NF_MAIN   = re.compile(r"NOTA\s+FISCAL\s+ELETR[ÔO]NICA\s*N[ºO]?\s*([\d\.]+)", re.I)
 RE_NF_ALT    = re.compile(r"\b(?:NF-?E|N[ºO]|NUM(?:ERO)?|NRO)\s*[:\-]?\s*([\d\.]+)", re.I)
-RE_NF_NUMERO = re.compile(r"N[ºO\.]?\s*([\d\.]+)", re.I)
+RE_NF_NUMERO = re.compile(r"N[ºO\.]?\s*[:\-]?\s*(\d{1,6})", re.I)
 RE_NF_DUPLIC = re.compile(r"^(\d{1,6})/\d+\b")
 
-RE_SERIE   = re.compile(r"S[ÉE]RIE\s*[: ]*\s*([0-9\.]{1,5})", re.I)
+# Padrões de série - MAIS FLEXÍVEIS
+RE_SERIE   = re.compile(r"S[ÉE]RIE\s*[:\-]?\s*([0-9\.]{1,5})", re.I)
+RE_SERIE_ALT = re.compile(r"(?:^|\n)S[ÉE]RIE\s*[:\-]?\s*(\d+)", re.I)
 
 RE_CNPJ_MASK   = re.compile(r"\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}")
 RE_CNPJ_PLAIN  = re.compile(r"\b\d{14}\b")
@@ -44,8 +48,9 @@ HEADER_KEYWORDS = {
 HEADERS = {"User-Agent": "NF-Cover-Extractor/1.0 (+github.com/)"}
 
 # =============== UTILS ===============
-def somente_digitos(s: str) -> str:
-    return re.sub(r"\D", "", s or "")
+def somente_digitos(s: str | Any) -> str:
+    s_str = str(s) if s is not None else ""
+    return re.sub(r"\D", "", s_str or "")
 
 def fmt_cnpj(cnpj_digits: str) -> str:
     d = somente_digitos(cnpj_digits)
@@ -178,7 +183,7 @@ def consulta_nome_por_cnpj(cnpj_raw: str, usar_raiz=True) -> str | None:
     CNPJ_CACHE[d] = {"nome": None, "fonte": None}
     return None
 
-# =============== EXTRAÇÃO ===============
+# =============== EXTRAÇÃO (CORRIGIDA) ===============
 def extrair_capa_de_texto(texto: str) -> dict:
     numero_nf = serie = None
     emitente_nome = emitente_doc = None
@@ -194,6 +199,41 @@ def extrair_capa_de_texto(texto: str) -> dict:
     for i, ln in enumerate(linhas):
         up = ln.upper().strip()
 
+        # ========== NÚMERO NF (CORRIGIDO) ==========
+        if not numero_nf:
+            # Tentar padrões principais primeiro
+            for pattern in [RE_NF_MAIN, RE_NF_ALT, RE_NF_NUMERO]:
+                m = pattern.search(ln)
+                if m:
+                    cand = m.group(1).replace(".", "").strip()
+                    try:
+                        val = int(cand)
+                        if 1 <= val <= 999999:
+                            numero_nf = str(val)
+                            break
+                    except:
+                        pass
+            
+            # Se ainda não encontrou, procurar em linhas com "N°:" ou "Nº:"
+            if not numero_nf and ("N°:" in ln or "Nº:" in ln):
+                m = re.search(r"(?:N[°ºO]|Nº)\s*[:\-]?\s*(\d{1,6})", ln)
+                if m:
+                    numero_nf = m.group(1)
+
+        # ========== SÉRIE (CORRIGIDO) ==========
+        if not serie:
+            for pattern in [RE_SERIE, RE_SERIE_ALT]:
+                m = pattern.search(ln)
+                if m:
+                    s = m.group(1).replace(".", "").strip()
+                    try: 
+                        serie = str(int(s))
+                    except: 
+                        serie = s
+                    if serie:
+                        break
+
+        # ========== EMITENTE ==========
         if not emitente_nome and i < 12:
             t = ln.strip()
             if t and not achar_doc_em_linha(t) and not re.search(r"\d", t) and not is_headerish(t):
@@ -206,30 +246,16 @@ def extrair_capa_de_texto(texto: str) -> dict:
                 emitente_doc = d
 
         if ("IDENTIFICAÇÃO DO EMITENTE" in up) or (up == "EMITENTE"):
-            sec = "emitente"; dest_header_seen = False; continue
+            sec = "emitente"
+            dest_header_seen = False
+            continue
         if up.startswith("DESTINAT"):
-            sec = "dest"; dest_header_seen = False; continue
+            sec = "dest"
+            dest_header_seen = False
+            continue
         if "DADOS DOS PRODUTOS" in up or "CÁLCULO DO IMPOSTO" in up or "CALCULO DO IMPOSTO" in up:
-            sec = None; dest_header_seen = False
-
-        if not numero_nf:
-            m = re.search(r"(?:NF-?E|N[ºO]|NUM(?:ERO)?|NRO)\s*[:\-]?\s*(\d{1,6})", ln, re.I)
-            if not m: m = RE_NF_MAIN.search(ln) or RE_NF_ALT.search(ln) or RE_NF_NUMERO.search(ln)
-            if not m: m = RE_NF_DUPLIC.search(ln)
-            if m:
-                cand = m.group(1).replace(".", "").strip()
-                try:
-                    val = int(cand)
-                    if 1 <= val <= 999999:
-                        numero_nf = str(val)
-                except: pass
-
-        if not serie:
-            ms = RE_SERIE.search(ln)
-            if ms:
-                s = ms.group(1).replace(".", "").strip()
-                try: serie = str(int(s))
-                except: serie = s
+            sec = None
+            dest_header_seen = False
 
         if sec == "emitente" and not emitente_nome:
             t = ln.strip()
@@ -237,6 +263,7 @@ def extrair_capa_de_texto(texto: str) -> dict:
                 if not any(w in IGNORAR_NOMES_EMIT for w in t.upper().split()):
                     emitente_nome = t
 
+        # ========== DESTINATÁRIO ==========
         if sec == "dest":
             if ("NOME" in up and ("CNPJ" in up or "CPF" in up) and "DATA" in up):
                 dest_header_seen = True
@@ -255,30 +282,43 @@ def extrair_capa_de_texto(texto: str) -> dict:
                 if t and not achar_doc_em_linha(t) and not is_headerish(t):
                     dest_nome = t
 
+        # ========== DATA ==========
         if not data_emissao:
             md = RE_DATA.search(ln)
             if md:
                 dd, mm, yyyy = md.group(0).split("/")
-                if 2006 <= int(yyyy) <= 2035:
-                    data_emissao = md.group(0)
+                try:
+                    if 2006 <= int(yyyy) <= 2035:
+                        data_emissao = md.group(0)
+                except:
+                    pass
 
+        # ========== VALOR TOTAL (CORRIGIDO) ==========
         if "TOTAL DA NOTA" in up and not valor_total:
             v = pick_last_money_on_same_or_next_lines(linhas, i, 6)
-            if v: valor_total = v
+            if v: 
+                valor_total = v
             continue
         if ("TOTAL DOS PRODUTOS" in up or "VALOR TOTAL" in up) and not valor_total:
             v = pick_last_money_on_same_or_next_lines(linhas, i, 6)
-            if v: candidato_total_produtos = v
+            if v: 
+                candidato_total_produtos = v
+        if "VALOR LÍQUIDO" in up and not valor_total:
+            v = pick_last_money_on_same_or_next_lines(linhas, i, 3)
+            if v:
+                valor_total = v
 
     if not valor_total and candidato_total_produtos:
         valor_total = candidato_total_produtos
 
     if not numero_nf:
         for ln in linhas:
-            m = re.search(r"\b\d{3,6}\b", ln)
+            m = re.search(r"\b(\d{3,6})\b", ln)
             if m and not achar_doc_em_linha(ln):
-                numero_nf = m.group(0)
-                break
+                cand = m.group(1)
+                if 1 <= int(cand) <= 999999:
+                    numero_nf = cand
+                    break
 
     return {
         "numero_nf": numero_nf,
@@ -328,26 +368,28 @@ def extrair_capa_de_pdf(arquivo_pdf: str, progress_callback=None) -> dict:
 
 # =============== ENRIQUECIMENTO POR CNPJ ===============
 def enriquecer_com_cnpj(df: pd.DataFrame, progress_callback=None) -> pd.DataFrame:
-    for idx, row in df.iterrows():
-        em_doc = row.get("emitente_doc")
+    for idx in df.index:
+        # EMITENTE
+        em_doc = df.loc[idx, "emitente_doc"]
         if em_doc:
             cnpj_digits = somente_digitos(em_doc)
             if len(cnpj_digits) == 14:
                 nome_cnpj = consulta_nome_por_cnpj(cnpj_digits, usar_raiz=True)
                 if nome_cnpj:
-                    if row.get("emitente_nome") != nome_cnpj:
+                    if df.loc[idx, "emitente_nome"] != nome_cnpj:
                         if progress_callback:
                             progress_callback(f"✓ Enriquecido: {nome_cnpj}")
-                        df.at[idx, "emitente_nome"] = nome_cnpj
+                        df.loc[idx, "emitente_nome"] = nome_cnpj
 
-        de_doc = row.get("dest_doc")
+        # DESTINATÁRIO
+        de_doc = df.loc[idx, "dest_doc"]
         if de_doc:
             d_digits = somente_digitos(de_doc)
             if len(d_digits) == 14:
                 nome_cnpj = consulta_nome_por_cnpj(d_digits, usar_raiz=True)
                 if nome_cnpj:
-                    if row.get("dest_nome") != nome_cnpj:
-                        df.at[idx, "dest_nome"] = nome_cnpj
+                    if df.loc[idx, "dest_nome"] != nome_cnpj:
+                        df.loc[idx, "dest_nome"] = nome_cnpj
     return df
 
 # =============== PROCESSAMENTO DE ARQUIVOS ===============
