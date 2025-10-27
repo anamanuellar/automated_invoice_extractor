@@ -1,0 +1,73 @@
+# Ambiente Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Ambientes virtuais
+venv/
+ENV/
+env/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Streamlit
+.streamlit/secrets.toml
+.streamlit/logger.log
+
+# Dados e saídas
+data/
+output/
+*.xlsx
+*.csv
+*.pdf
+
+# Temp e cache
+tmp/
+temp/
+.cache/
+*.cache
+
+# Variáveis de ambiente
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+logs/
+
+# Testes
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Sistema
+.DS_Store
+Thumbs.db
