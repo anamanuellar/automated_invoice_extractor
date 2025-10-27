@@ -4,7 +4,8 @@ import tempfile
 import os
 from pathlib import Path
 from datetime import datetime
-from extrator import processar_pdfs, exportar_para_excel
+import pandas as pd
+from extrator import processar_pdfs
 from ia_simples import (
     classify_expense_hf,
     detect_anomalies,
@@ -12,6 +13,43 @@ from ia_simples import (
     simple_forecast,
     add_ia_to_streamlit
 )
+import io
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment
+
+
+# =============== FUNÇÃO AUXILIAR ===============
+def exportar_para_excel(df) -> bytes:
+    """Exporta DataFrame para bytes de arquivo Excel"""
+    output = io.BytesIO()
+    
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, sheet_name='Notas Fiscais', index=False)
+        
+        # Estilizar cabeçalho
+        worksheet = writer.sheets['Notas Fiscais']
+        header_fill = PatternFill(start_color="1F77B4", end_color="1F77B4", fill_type="solid")
+        header_font = Font(bold=True, color="FFFFFF")
+        
+        for cell in worksheet[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+        
+        # Ajustar larguras
+        for column in worksheet.columns:
+            max_length = 0
+            column_letter = column[0].column_letter
+            for cell in column:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            worksheet.column_dimensions[column_letter].width = min(max_length + 2, 50)
+    
+    output.seek(0)
+    return output.getvalue()
 
 
 # =============== CONFIG STREAMLIT ===============
