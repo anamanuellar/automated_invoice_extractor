@@ -1,6 +1,330 @@
-pdfplumber==0.11.0
-pandas==2.2.2
-openpyxl==3.1.5
-pytesseract==0.3.13
-Pillow==10.4.0
-PyMuPDF==1.24.9
+import pandas as pd
+import numpy as np
+import unicodedata
+from datetime import datetime, date
+
+# Importa as regras de negócio, feriados e regras CCT
+from regras_de_negocio import regras_de_negocio
+from feriados import get_dias_uteis_com_feriados
+from regras_cct_final import (
+    obter_regras_por_sindicato,
+    get_estado_por_sindicato,
+    get_uf_cidade_por_sindicato,
+    VR_SEM_PAGAMENTO_FERIAS,
+)
+
+def _as_date(value):
+    if pd.isna(value):
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    try:
+        return pd.to_datetime(value).date()
+    except Exception:
+        return None
+
+def norm_cols(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    # Adiciona a normalização de caracteres com acentos
+    df.columns = (
+        pd.Index(df.columns)
+        .map(str)
+        .str.normalize('NFKD')
+        .str.encode('ascii', 'ignore')
+        .str.decode('utf-8')
+        .str.strip()
+        .str.replace(r"\s+", "_", regex=True)
+        .str.lower()
+    )
+    return df
+
+def to_date(df: pd.DataFrame, cols) -> pd.DataFrame:
+    df = df.copy()
+    for c in cols:
+        if c in df.columns:
+            df[c] = pd.to_datetime(df[c], errors="coerce").dt.date
+    return df
+
+def trim_upper(s: pd.Series) -> pd.Series:
+    return (
+        s.fillna("")
+        .astype(str)
+        .str.replace(r"[\u200B-\u200D\uFEFF]", "", regex=True)
+        .str.strip()
+        .str.upper()
+        .replace("NAN", np.nan)
+    )
+
+def preprocess_ferias(df: pd.DataFrame) -> pd.DataFrame:
+    df = norm_cols(df)
+    if "dias_de_férias" in df.columns:
+        df = df.rename(columns={"dias_de_férias": "dias_de_ferias"})
+    keep = ["matricula", "dias_de_ferias"]
+    df = df[[c for c in keep if c in df.columns]].dropna(subset=["matricula"])
+    if "dias_de_ferias" not in df.columns:
+        df["dias_de_ferias"] = 0
+    else:
+        df["dias_de_ferias"] = pd.to_numeric(df["dias_de_ferias"], errors="coerce").fillna(0).clip(lower=0, upper=31)
+    return df
+
+def preprocess_desligados(df: pd.DataFrame) -> pd.DataFrame:
+    df = norm_cols(df)
+    col_desligamento = ["data_demissao", "data_desligamento"]
+    data_col = next((c for c in col_desligamento if c in df.columns), None)
+    if data_col:
+        df = df.rename(columns={data_col: "data_desligamento"})
+    else:
+        df["data_desligamento"] = pd.NaT
+    if "comunicado_de_desligamento" in df.columns:
+        df = df.rename(columns={"comunicado_de_desligamento": "deslig_ok"})
+    else:
+        df["deslig_ok"] = ""
+    
+    df = to_date(df, ["data_desligamento"])
+    keep = ["matricula", "data_desligamento", "deslig_ok"]
+    return df[[c for c in keep if c in df.columns]].dropna(subset=["matricula"])
+
+def preprocess_admissoes(df: pd.DataFrame) -> pd.DataFrame:
+    df = norm_cols(df)
+    df = df.rename(columns={"admissão": "data_admissao"})
+    df = to_date(df, ["data_admissao"])
+    keep = ["matricula", "data_admissao"]
+    return df[[c for c in keep if c in df.columns]].dropna(subset=["matricula"])
+
+def preprocess_sindicato_valor(df: pd.DataFrame) -> pd.DataFrame:
+    df = norm_cols(df)
+    df = df.rename(columns={"valor": "valor_vr_dia"})
+    df["estado"] = df["estado"].astype(str).apply(
+        lambda x: unicodedata.normalize('NFKD', str(x)).encode('ascii', 'ignore').decode('utf-8').strip().title()
+    )
+    df["valor_vr_dia"] = pd.to_numeric(df["valor_vr_dia"], errors="coerce")
+    keep = ["estado", "valor_vr_dia"]
+    return df[[c for c in keep if c in df.columns]].dropna(subset=["estado"])
+
+def preprocess_dias_uteis_sindicato(df: pd.DataFrame) -> pd.DataFrame:
+    df = norm_cols(df)
+    df.columns = df.columns.str.strip().str.lower().str.replace(' ', '_')
+    col_renames = {}
+    for c in df.columns:
+        if c.startswith("sind"):
+            col_renames[c] = "sindicato"
+        elif "dias" in c and "uteis" in c:
+            col_renames[c] = "dias_uteis_mes"
+    df = df.rename(columns=col_renames)
+    if "sindicato" not in df.columns or "dias_uteis_mes" not in df.columns:
+        print("Colunas encontradas na planilha Base dias uteis:", list(df.columns))
+        raise ValueError("Colunas esperadas não encontradas em 'Base dias uteis'")
+    df["sindicato"] = trim_upper(df["sindicato"])
+    df["dias_uteis_mes"] = pd.to_numeric(df["dias_uteis_mes"], errors="coerce")
+    return df[["sindicato", "dias_uteis_mes"]].dropna()
+
+def preprocess_exterior(df: pd.DataFrame) -> pd.DataFrame:
+    df = norm_cols(df)
+    df = df.iloc[:, :3]
+    df.columns = ['cadastro', 'valor', 'observacao']
+    df['obs_normalizada'] = df['observacao'].astype(str).str.lower().str.strip()
+    cond_exclusao = df['obs_normalizada'].str.contains('retornou do exterior')
+    df_filtrado = df[~cond_exclusao]
+    df_out = df_filtrado[['cadastro']].dropna().drop_duplicates()
+    df_out = df_out.rename(columns={'cadastro': 'matricula'})
+    df_out['flag_exterior'] = True
+    return df_out
+
+def preprocess_afastamentos(df: pd.DataFrame) -> pd.DataFrame:
+    df.columns = ["matricula", "desc_situacao", "na_compra", "comentario"]
+    df["comentario"] = df["comentario"].astype(str).str.lower()
+    
+    competencia_ano = datetime.strptime(regras_de_negocio["calculo"]["competencia"]["data_fim_calculo"], "%Y-%m-%d").year
+    
+    df["data_retorno_afastamento"] = df["comentario"].str.extract(r"(\d{2}/\d{2})")
+    df["data_retorno_afastamento"] = pd.to_datetime(
+        df["data_retorno_afastamento"] + f"/{competencia_ano}", format="%d/%m/%Y", errors="coerce"
+    )
+    df["flag_afastado_total"] = df["data_retorno_afastamento"].isna()
+    df["data_retorno_afastamento"] = df["data_retorno_afastamento"].dt.date
+    return df[["matricula", "desc_situacao", "flag_afastado_total", "data_retorno_afastamento"]]
+
+def preprocess_listas_excluir(df: pd.DataFrame, flag_col: str) -> pd.DataFrame:
+    df = norm_cols(df)
+    return df[["matricula"]].assign(**{flag_col: True}).dropna(subset=["matricula"])
+
+def run_main_calculation():
+    # Carrega dados
+    ativos = pd.read_excel("ATIVOS.xlsx")
+    ferias = pd.read_excel("FÉRIAS.xlsx")
+    afastamentos = pd.read_excel("AFASTAMENTOS.xlsx")
+    estagiarios = pd.read_excel("ESTÁGIO.xlsx")
+    aprendizes = pd.read_excel("APRENDIZ.xlsx")
+    exterior = pd.read_excel("EXTERIOR.xlsx")
+    desligados = pd.read_excel("DESLIGADOS.xlsx")
+    admissoes = pd.read_excel("ADMISSÃO ABRIL.xlsx")
+    dias_uteis = pd.read_excel("Base dias uteis.xlsx", header=1)
+    valor_vr = pd.read_excel("Base sindicato x valor.xlsx")
+
+    # Pré-processamento
+    ativos_pp = norm_cols(ativos)
+    ferias_pp = preprocess_ferias(ferias)
+    afastamentos_pp = preprocess_afastamentos(afastamentos)
+    estagios_pp = preprocess_listas_excluir(estagiarios, "flag_estagio")
+    aprendizes_pp = preprocess_listas_excluir(aprendizes, "flag_aprendiz")
+    exterior_pp = preprocess_exterior(exterior)
+    desligados_pp = preprocess_desligados(desligados)
+    admissoes_pp = preprocess_admissoes(admissoes)
+    dias_uteis_pp = preprocess_dias_uteis_sindicato(dias_uteis)
+    valor_vr_pp = preprocess_sindicato_valor(valor_vr)
+
+    # Inicialização das datas de competência com base nas regras
+    data_competencia_inicio = datetime.strptime(regras_de_negocio["calculo"]["competencia"]["data_inicio_calculo"], "%Y-%m-%d").date()
+    data_competencia_fim = datetime.strptime(regras_de_negocio["calculo"]["competencia"]["data_fim_calculo"], "%Y-%m-%d").date()
+    data_limite = pd.Timestamp(data_competencia_fim).replace(day=regras_de_negocio["calculo"]["regra_desligamento"]["dia_limite_exclusao_total"])
+
+    # Verifica se a coluna existe antes de tentar acessá-la
+    if "data_desligamento" in desligados_pp.columns:
+        desligados_pp["data_desligamento"] = pd.to_datetime(desligados_pp["data_desligamento"]).dt.normalize()
+        desligados_after_15_mai = desligados_pp[(desligados_pp["data_desligamento"] > data_limite)]["matricula"].unique()
+    else:
+        desligados_after_15_mai = []
+
+    matriculas_ferias = ferias_pp["matricula"].unique()
+    mask_sem_sindicato = ativos_pp["sindicato"].isna() | (ativos_pp["sindicato"] == "")
+    mask_desligados_sp = ativos_pp["matricula"].isin(desligados_after_15_mai)
+    mask_ferias_pr = ativos_pp["matricula"].isin(matriculas_ferias)
+    ativos_pp.loc[mask_sem_sindicato & mask_desligados_sp, "sindicato"] = "SINDPD SP - SIND.TRAB.EM PROC DADOS E EMPR.EMPRESAS PROC DADOS ESTADO DE SP."
+    ativos_pp.loc[mask_sem_sindicato & (~mask_desligados_sp) & mask_ferias_pr, "sindicato"] = "SITEPD PR - SIND DOS TRAB EM EMPR PRIVADAS DE PROC DE DADOS DE CURITIBA E REGIAO METROPOLITANA"
+
+    # Merge das bases
+    bases_para_merge = [admissoes_pp, ferias_pp, desligados_pp, estagios_pp, aprendizes_pp, exterior_pp, afastamentos_pp]
+    base_calculo = ativos_pp.copy()
+    for df_merge in bases_para_merge:
+        base_calculo = pd.merge(base_calculo, df_merge, on="matricula", how="left")
+
+    # Criação das flags para identificar aprendizes/estagiários/exterior após o merge
+    for flag_col in ["flag_estagio", "flag_aprendiz", "flag_exterior", "flag_afastado_total"]:
+        if flag_col in base_calculo.columns:
+            base_calculo[flag_col] = base_calculo[flag_col].fillna(False)
+        else:
+            base_calculo[flag_col] = False
+
+    # APLICANDO A NOVA REGRA PARA EXCEÇÃO DE AFASTAMENTO E FÉRIAS POR SINDICATO
+    sindicatos_excecao = [
+        "SINDPD SP - SIND.TRAB.EM PROC DADOS E EMPR.EMPRESAS PROC DADOS ESTADO DE SP.",
+        "SITEPD PR - SIND DOS TRAB EM EMPR PRIVADAS DE PROC DE DADOS DE CURITIBA E REGIAO METROPOLITANA"
+    ]
+    
+    condicao_afastamento_sindicato = (base_calculo["flag_afastado_total"]) & (base_calculo["sindicato"].isin(sindicatos_excecao))
+    base_calculo.loc[condicao_afastamento_sindicato, "flag_afastado_total"] = False
+
+    base_calculo["cargo"] = trim_upper(base_calculo.get("titulo_do_cargo", pd.Series(index=base_calculo.index)))
+    base_calculo["flag_excl_cargo"] = base_calculo["cargo"].str.contains("|".join(regras_de_negocio["exclusoes"]["cargos_proibidos"]), na=False)
+
+    # Filtro final APÓS o merge
+    base_final = base_calculo[
+        ~(base_calculo["flag_excl_cargo"] | base_calculo["flag_estagio"] | base_calculo["flag_aprendiz"]
+          | base_calculo["flag_exterior"] | base_calculo["flag_afastado_total"])
+    ].copy()
+
+    # Aplicação da regra de desligamento.
+    base_final = base_final[
+        ((base_final["data_desligamento"].isnull()) | (base_final["data_desligamento"] > data_limite) | (base_final["deslig_ok"] != "OK"))
+    ].copy()
+
+    # Filtra por admissões no período
+    if "data_admissao" in base_final.columns:
+        base_final["data_admissao"] = pd.to_datetime(base_final["data_admissao"], errors="coerce")
+        fim_periodo = pd.Timestamp(regras_de_negocio["calculo"]["competencia"]["data_fim_calculo"])
+        base_final = base_final[
+            (base_final["data_admissao"].isnull()) | (base_final["data_admissao"] <= fim_periodo)
+        ].copy()
+
+    # Cálculo VR
+    base_final["estado"] = base_final["sindicato"].map(get_estado_por_sindicato)
+    base_final = base_final.merge(dias_uteis_pp, on="sindicato", how="left")
+    base_final = base_final.merge(valor_vr_pp, on="estado", how="left")
+
+    def calcular_dias_vr(row):
+        sindicato = row["sindicato"]
+        regras = obter_regras_por_sindicato(sindicato)
+        data_admissao = _as_date(row.get("data_admissao"))
+        data_retorno = _as_date(row.get("data_retorno_afastamento"))
+        data_desligamento = _as_date(row.get("data_desligamento"))
+        
+        if not data_admissao:
+            data_admissao = data_competencia_inicio
+        else:
+            data_admissao = max(data_admissao, data_competencia_inicio)
+        
+        if not data_retorno:
+            data_retorno = data_competencia_inicio
+        else:
+            data_retorno = max(data_retorno, data_competencia_inicio)
+        
+        if not data_desligamento:
+            data_desligamento = data_competencia_fim
+        else:
+            data_desligamento = min(data_desligamento, data_competencia_fim)
+
+        data_inicio = max(data_admissao, data_retorno)
+        data_fim = min(data_desligamento, data_competencia_fim)
+
+        if regras and regras.get("dias_fixos"):
+            dias_vr = regras["dias_fixos"]
+        else:
+            dias_vr = get_dias_uteis_com_feriados(data_inicio, data_fim, sindicato)
+
+        if sindicato in VR_SEM_PAGAMENTO_FERIAS and pd.notnull(row.get("dias_de_ferias")):
+            dias_vr -= int(row["dias_de_ferias"])
+        return max(dias_vr, 0)
+
+    base_final["dias_vr"] = base_final.apply(calcular_dias_vr, axis=1)
+
+    empresa_paga_percent = regras_de_negocio["calculo"]["porcentagem_custo"]["empresa"]
+    desconto_colaborador_percent = regras_de_negocio["calculo"]["porcentagem_custo"]["colaborador"]
+
+    base_final["valor_total_vr"] = base_final["dias_vr"] * base_final["valor_vr_dia"]
+    base_final["empresa_paga"] = base_final["valor_total_vr"] * empresa_paga_percent
+    base_final["desconto_colaborador"] = base_final["valor_total_vr"] * desconto_colaborador_percent
+
+    if base_final["valor_vr_dia"].isnull().any():
+        missing_sind = base_final.loc[base_final["valor_vr_dia"].isnull(), "sindicato"].unique()
+        print(f"Aviso: Sindicatos sem valor_vr_dia definido: {missing_sind}")
+    if (base_final["dias_vr"] < 0).any():
+        raise ValueError("Existem dias_vr negativos, por favor verifique o cálculo.")
+    if regras_de_negocio.get("calculo", {}).get("dias_fixos"):
+        dias_fixos = regras_de_negocio["calculo"]["dias_fixos"]
+        if (base_final["dias_vr"] > dias_fixos).any():
+            raise ValueError("Existe dias_vr acima do limite de dias fixos definido.")
+
+    # Exportação
+    layout_export = base_final.copy()
+    data_competencia_fim_export = datetime.strptime(regras_de_negocio["calculo"]["competencia"]["data_fim_calculo"], "%Y-%m-%d")
+    competencia_mes = data_competencia_fim_export.month
+    competencia_ano = data_competencia_fim_export.year
+    layout_export["competencia"] = f'{competencia_mes:02d}.{competencia_ano}'
+    layout_export["Observação"] = ""
+    col_renomear = {
+        "matricula": "Matrícula",
+        "data_admissao": "Admissão",
+        "sindicato": "Sindicato do Colaborador",
+        "competencia": "Competência",
+        "dias_vr": "Dias",
+        "valor_vr_dia": "VALOR DIÁRIO",
+        "valor_total_vr": "TOTAL",
+        "empresa_paga": "Custo empresa",
+        "desconto_colaborador": "Desconto profissional",
+        "Observação": "OBS GERAL",
+    }
+    layout_export = layout_export.rename(columns=col_renomear)
+    colunas_layout_final = [
+        "Matrícula", "Admissão", "Sindicato do Colaborador", "Competência",
+        "Dias", "VALOR DIÁRIO", "TOTAL", "Custo empresa", "Desconto profissional", "OBS GERAL"
+    ]
+    caminho_arquivo = f"VR MENSAL {competencia_mes:02d}.{competencia_ano}.xlsx"
+    layout_export.to_excel(caminho_arquivo, index=False)
+    print(f"Arquivo exportado com sucesso para: {caminho_arquivo}")
+
+    return base_final
+
+if __name__ == "__main__":
+    run_main_calculation()
