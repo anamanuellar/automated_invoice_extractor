@@ -6,10 +6,8 @@ from typing import Any
 
 import pdfplumber
 import pandas as pd
-from PIL import Image, ImageEnhance
+from PIL import Image, ImageEnhance, ImageOps
 import fitz  # PyMuPDF
-import cv2
-import numpy as np
 
 # =============== CONFIG ===============
 DEBUG = False
@@ -191,24 +189,24 @@ def consulta_nome_por_cnpj(cnpj_raw: str, usar_raiz=True) -> str | None:
 
 # =============== PROCESSAMENTO DE IMAGEM ===============
 def melhorar_imagem_para_ocr(img: Image.Image) -> Image.Image:
-    """Melhora imagem para OCR com CLAHE"""
+    """Melhora imagem para OCR usando apenas PIL"""
     try:
         img = img.convert('RGB')
+        
+        # Aumentar resolução
         img = img.resize((img.width * 2, img.height * 2), Image.Resampling.LANCZOS)
         
-        img_cv = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
-        
-        lab = cv2.cvtColor(img_cv, cv2.COLOR_BGR2LAB)
-        l, a, b = cv2.split(lab)
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-        l = clahe.apply(l)
-        lab = cv2.merge([l, a, b])
-        img_cv = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
-        
-        img = Image.fromarray(cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB))
-        
+        # Aumentar contraste
         enhancer = ImageEnhance.Contrast(img)
         img = enhancer.enhance(2)
+        
+        # Aumentar brilho se necessário
+        enhancer_brightness = ImageEnhance.Brightness(img)
+        img = enhancer_brightness.enhance(1.1)
+        
+        # Aumentar nitidez
+        enhancer_sharp = ImageEnhance.Sharpness(img)
+        img = enhancer_sharp.enhance(2)
         
         return img
     except:
