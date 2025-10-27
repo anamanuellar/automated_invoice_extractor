@@ -1,4 +1,4 @@
-# extrator_corrigido.py - Lógica de extração de NFs (VERSÃO CORRIGIDA)
+# extrator.py - Lógica de extração de NFs com OCR MELHORADO
 import os, io, re, requests, time
 from pathlib import Path
 from datetime import datetime
@@ -7,24 +7,27 @@ from typing import Any
 import pdfplumber
 import pandas as pd
 import pytesseract
-from PIL import Image
+from PIL import Image, ImageEnhance
 import fitz  # PyMuPDF
 
 # =============== CONFIG ===============
 DEBUG = False  # Desabilita debug em produção
 CNPJ_CACHE: dict[str, dict] = {}
 
-# =============== REGEX (CORRIGIDO) ===============
+# Configurar Tesseract para português
+os.environ['TESSDATA_PREFIX'] = '/usr/share/tesseract-ocr/5/tessdata'
+
+# =============== REGEX ===============
 RE_MOEDA = re.compile(r"R?\$?\s*(\d{1,3}(?:\.\d{3})*,\d{2})")
 RE_DATA  = re.compile(r"\b\d{2}/\d{2}/\d{4}\b")
 
-# Padrões de número de NF - MAIS FLEXÍVEIS
+# Padrões de número de NF
 RE_NF_MAIN   = re.compile(r"NOTA\s+FISCAL\s+ELETR[ÔO]NICA\s*N[ºO]?\s*([\d\.]+)", re.I)
 RE_NF_ALT    = re.compile(r"\b(?:NF-?E|N[ºO]|NUM(?:ERO)?|NRO)\s*[:\-]?\s*([\d\.]+)", re.I)
 RE_NF_NUMERO = re.compile(r"N[ºO\.]?\s*[:\-]?\s*(\d{1,6})", re.I)
 RE_NF_DUPLIC = re.compile(r"^(\d{1,6})/\d+\b")
 
-# Padrões de série - MAIS FLEXÍVEIS
+# Padrões de série
 RE_SERIE   = re.compile(r"S[ÉE]RIE\s*[:\-]?\s*([0-9\.]{1,5})", re.I)
 RE_SERIE_ALT = re.compile(r"(?:^|\n)S[ÉE]RIE\s*[:\-]?\s*(\d+)", re.I)
 
@@ -118,7 +121,7 @@ def cnpj_raiz_0001(cnpj_digits: str) -> str:
     dv1, dv2 = calcula_dvs_cnpj(base12)
     return base12 + str(dv1) + str(dv2)
 
-# =============== CONSULTA CNPJ (múltiplas fontes) ===============
+# =============== CONSULTA CNPJ ===============
 def _try_brasilapi(cnpj14: str) -> dict | None:
     try:
         url = f"https://brasilapi.com.br/api/cnpj/v1/{cnpj14}"
@@ -183,7 +186,60 @@ def consulta_nome_por_cnpj(cnpj_raw: str, usar_raiz=True) -> str | None:
     CNPJ_CACHE[d] = {"nome": None, "fonte": None}
     return None
 
-# =============== EXTRAÇÃO (CORRIGIDA) ===============
+# =============== OCR MELHORADO ===============
+def extrair_texto_ocr_melhorado(pdf_path: str, progress_callback=None) -> str:
+    """
+    Extrai texto de PDF scaneado com OCR melhorado
+    - Aumenta resolução
+    - Melhora contraste
+    - Trata cada página
+    """
+    texto_acumulado = []
+    
+    try:
+        doc = fitz.open(pdf_path)
+        
+        for page_num in range(doc.page_count):
+            try:
+                page = doc.load_page(page_num)
+                
+                # Aumentar resolução para melhor OCR (2x zoom)
+                mat = fitz.Matrix(2, 2)
+                pix = page.get_pixmap(matrix=mat)
+                
+                # Converter para PIL
+                img = Image.open(io.BytesIO(pix.tobytes("png")))
+                
+                # Converter para grayscale
+                img = img.convert('L')
+                
+                # Aumentar contraste
+                enhancer = ImageEnhance.Contrast(img)
+                img = enhancer.enhance(2)
+                
+                # Aumentar nitidez
+                enhancer_sharp = ImageEnhance.Sharpness(img)
+                img = enhancer_sharp.enhance(2)
+                
+                # OCR com português
+                texto = pytesseract.image_to_string(img, lang='por+eng')
+                if texto and texto.strip():
+                    texto_acumulado.append(texto)
+                
+            except Exception as e:
+                if progress_callback:
+                    progress_callback(f"⚠️ Erro OCR página {page_num + 1}: {e}")
+                continue
+        
+        doc.close()
+        return "\n".join(texto_acumulado)
+    
+    except Exception as e:
+        if progress_callback:
+            progress_callback(f"❌ Erro ao processar PDF para OCR: {e}")
+        return ""
+
+# =============== EXTRAÇÃO DE TEXTO ===============
 def extrair_capa_de_texto(texto: str) -> dict:
     numero_nf = serie = None
     emitente_nome = emitente_doc = None
@@ -199,7 +255,7 @@ def extrair_capa_de_texto(texto: str) -> dict:
     for i, ln in enumerate(linhas):
         up = ln.upper().strip()
 
-        # ========== NÚMERO NF (CORRIGIDO - Procurar números maiores primeiro) ==========
+        # ========== NÚMERO NF ==========
         if not numero_nf:
             # Procurar padrão específico "N°: XXXXX"
             m = re.search(r"N[°ºO]\s*[:\-]?\s*(\d{3,6})", ln)
@@ -226,7 +282,7 @@ def extrair_capa_de_texto(texto: str) -> dict:
                         except:
                             pass
 
-        # ========== SÉRIE (CORRIGIDO) ==========
+        # ========== SÉRIE ==========
         if not serie:
             for pattern in [RE_SERIE, RE_SERIE_ALT]:
                 m = pattern.search(ln)
@@ -242,10 +298,9 @@ def extrair_capa_de_texto(texto: str) -> dict:
         # ========== EMITENTE ==========
         if not emitente_nome and i < 15:
             t = ln.strip()
-            # Validar: tem tamanho mínimo, não é número puro, não é header
             if (t and len(t) > 3 and 
                 not achar_doc_em_linha(t) and 
-                not re.search(r"^\d+$", t) and  # Não é só números
+                not re.search(r"^\d+$", t) and
                 not is_headerish(t)):
                 if not any(w in IGNORAR_NOMES_EMIT for w in t.upper().split()):
                     emitente_nome = t
@@ -306,7 +361,7 @@ def extrair_capa_de_texto(texto: str) -> dict:
                 except:
                     pass
 
-        # ========== VALOR TOTAL (CORRIGIDO) ==========
+        # ========== VALOR TOTAL ==========
         if "TOTAL DA NOTA" in up and not valor_total:
             v = pick_last_money_on_same_or_next_lines(linhas, i, 6)
             if v: 
@@ -329,9 +384,12 @@ def extrair_capa_de_texto(texto: str) -> dict:
             m = re.search(r"\b(\d{3,6})\b", ln)
             if m and not achar_doc_em_linha(ln):
                 cand = m.group(1)
-                if 1 <= int(cand) <= 999999:
-                    numero_nf = cand
-                    break
+                try:
+                    if 1 <= int(cand) <= 999999:
+                        numero_nf = cand
+                        break
+                except:
+                    pass
 
     return {
         "numero_nf": numero_nf,
@@ -346,11 +404,13 @@ def extrair_capa_de_texto(texto: str) -> dict:
     }
 
 def extrair_capa_de_pdf(arquivo_pdf: str, progress_callback=None) -> dict:
+    """Extrai dados da NF - tenta pdfplumber primeiro, depois OCR"""
+    
     try:
         with pdfplumber.open(arquivo_pdf) as pdf:
             for page in pdf.pages:
                 txt = page.extract_text() or ""
-                if txt:
+                if txt and len(txt.strip()) > 50:  # Se tem bastante texto
                     dados = extrair_capa_de_texto(txt)
                     if any([dados["numero_nf"], dados["emitente_doc"], dados["dest_doc"], dados["valor_total"]]):
                         return {"arquivo": Path(arquivo_pdf).name, **dados}
@@ -358,26 +418,27 @@ def extrair_capa_de_pdf(arquivo_pdf: str, progress_callback=None) -> dict:
         if progress_callback:
             progress_callback(f"⚠️ Erro ao ler PDF: {e}")
 
-    # Fallback OCR
+    # Fallback OCR com qualidade melhorada
     try:
         if progress_callback:
             progress_callback(f"🔄 Usando OCR em: {Path(arquivo_pdf).name}")
-        doc = fitz.open(arquivo_pdf)
-        acum_txt = []
-        for p in range(doc.page_count):
-            pix = doc.load_page(p).get_pixmap()
-            img = Image.open(io.BytesIO(pix.tobytes("png")))
-            acum_txt.append(pytesseract.image_to_string(img, lang="por"))
-        dados = extrair_capa_de_texto("\n".join(acum_txt))
-        return {"arquivo": Path(arquivo_pdf).name, **dados}
+        
+        texto_ocr = extrair_texto_ocr_melhorado(arquivo_pdf, progress_callback)
+        
+        if texto_ocr and len(texto_ocr.strip()) > 50:
+            dados = extrair_capa_de_texto(texto_ocr)
+            if any([dados["numero_nf"], dados["emitente_doc"], dados["dest_doc"], dados["valor_total"]]):
+                return {"arquivo": Path(arquivo_pdf).name, **dados}
     except Exception as e:
         if progress_callback:
             progress_callback(f"❌ Falha OCR: {e}")
-        vazio = {k: None for k in [
-            "numero_nf","serie","emitente_doc","emitente_nome",
-            "dest_doc","dest_nome","data_emissao","valor_total","valor_total_num"
-        ]}
-        return {"arquivo": Path(arquivo_pdf).name, **vazio}
+    
+    # Retornar vazio se falhou
+    vazio = {k: None for k in [
+        "numero_nf","serie","emitente_doc","emitente_nome",
+        "dest_doc","dest_nome","data_emissao","valor_total","valor_total_num"
+    ]}
+    return {"arquivo": Path(arquivo_pdf).name, **vazio}
 
 # =============== ENRIQUECIMENTO POR CNPJ ===============
 def enriquecer_com_cnpj(df: pd.DataFrame, progress_callback=None) -> pd.DataFrame:
