@@ -1,4 +1,6 @@
 import streamlit as st
+import pytesseract
+from PIL import Image
 import tempfile
 import os
 from pathlib import Path
@@ -11,6 +13,9 @@ from ia_simples import (
     simple_forecast,
     add_ia_to_streamlit
 )
+
+# Configurar o caminho do Tesseract (ajuste conforme necessário)
+pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 
 # =============== CONFIG STREAMLIT ===============
 st.set_page_config(
