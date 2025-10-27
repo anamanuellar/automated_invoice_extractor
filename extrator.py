@@ -199,26 +199,32 @@ def extrair_capa_de_texto(texto: str) -> dict:
     for i, ln in enumerate(linhas):
         up = ln.upper().strip()
 
-        # ========== NÚMERO NF (CORRIGIDO) ==========
+        # ========== NÚMERO NF (CORRIGIDO - Procurar números maiores primeiro) ==========
         if not numero_nf:
-            # Tentar padrões principais primeiro
-            for pattern in [RE_NF_MAIN, RE_NF_ALT, RE_NF_NUMERO]:
-                m = pattern.search(ln)
-                if m:
-                    cand = m.group(1).replace(".", "").strip()
-                    try:
-                        val = int(cand)
-                        if 1 <= val <= 999999:
-                            numero_nf = str(val)
-                            break
-                    except:
-                        pass
+            # Procurar padrão específico "N°: XXXXX"
+            m = re.search(r"N[°ºO]\s*[:\-]?\s*(\d{3,6})", ln)
+            if m:
+                cand = m.group(1)
+                try:
+                    val = int(cand)
+                    if 1 <= val <= 999999:
+                        numero_nf = str(val)
+                except:
+                    pass
             
-            # Se ainda não encontrou, procurar em linhas com "N°:" ou "Nº:"
-            if not numero_nf and ("N°:" in ln or "Nº:" in ln):
-                m = re.search(r"(?:N[°ºO]|Nº)\s*[:\-]?\s*(\d{1,6})", ln)
-                if m:
-                    numero_nf = m.group(1)
+            # Se ainda não encontrou, tentar padrões principais
+            if not numero_nf:
+                for pattern in [RE_NF_MAIN, RE_NF_ALT, RE_NF_NUMERO]:
+                    m = pattern.search(ln)
+                    if m:
+                        cand = m.group(1).replace(".", "").strip()
+                        try:
+                            val = int(cand)
+                            if 1 <= val <= 999999:
+                                numero_nf = str(val)
+                                break
+                        except:
+                            pass
 
         # ========== SÉRIE (CORRIGIDO) ==========
         if not serie:
@@ -234,9 +240,13 @@ def extrair_capa_de_texto(texto: str) -> dict:
                         break
 
         # ========== EMITENTE ==========
-        if not emitente_nome and i < 12:
+        if not emitente_nome and i < 15:
             t = ln.strip()
-            if t and not achar_doc_em_linha(t) and not re.search(r"\d", t) and not is_headerish(t):
+            # Validar: tem tamanho mínimo, não é número puro, não é header
+            if (t and len(t) > 3 and 
+                not achar_doc_em_linha(t) and 
+                not re.search(r"^\d+$", t) and  # Não é só números
+                not is_headerish(t)):
                 if not any(w in IGNORAR_NOMES_EMIT for w in t.upper().split()):
                     emitente_nome = t
 
@@ -259,7 +269,10 @@ def extrair_capa_de_texto(texto: str) -> dict:
 
         if sec == "emitente" and not emitente_nome:
             t = ln.strip()
-            if t and not achar_doc_em_linha(t) and not re.search(r"\d", t) and not is_headerish(t):
+            if (t and len(t) > 3 and
+                not achar_doc_em_linha(t) and 
+                not re.search(r"^\d+$", t) and
+                not is_headerish(t)):
                 if not any(w in IGNORAR_NOMES_EMIT for w in t.upper().split()):
                     emitente_nome = t
 
