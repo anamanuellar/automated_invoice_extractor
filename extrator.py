@@ -44,7 +44,10 @@ HEADER_KEYWORDS = {
 
 HEADERS = {"User-Agent": "NF-Cover-Extractor/1.0 (+github.com/)"}
 
-# =============== PADDLE OCR ===============
+# =============== OCR ENGINES ===============
+PADDLE_OCR = None
+EASY_OCR = None
+
 def carregar_paddle_ocr():
     """Carrega PaddleOCR com cache"""
     try:
@@ -55,7 +58,15 @@ def carregar_paddle_ocr():
         if DEBUG: print(f"Erro ao carregar PaddleOCR: {e}")
         return None
 
-PADDLE_OCR = None
+def carregar_easy_ocr():
+    """Carrega EasyOCR como alternativa"""
+    try:
+        import easyocr
+        reader = easyocr.Reader(['pt', 'en'], gpu=False)
+        return reader
+    except Exception as e:
+        if DEBUG: print(f"Erro ao carregar EasyOCR: {e}")
+        return None
 
 def extrair_texto_paddle_ocr(pdf_path: str, progress_callback=None) -> str:
     """Extrai texto usando PaddleOCR"""
@@ -64,10 +75,9 @@ def extrair_texto_paddle_ocr(pdf_path: str, progress_callback=None) -> str:
     texto_acumulado = []
     
     try:
-        # Carregar OCR na primeira vez
         if PADDLE_OCR is None:
             if progress_callback:
-                progress_callback("📥 Baixando modelo PaddleOCR (primeira vez)...")
+                progress_callback("📥 Carregando PaddleOCR...")
             PADDLE_OCR = carregar_paddle_ocr()
         
         if not PADDLE_OCR:
@@ -78,44 +88,85 @@ def extrair_texto_paddle_ocr(pdf_path: str, progress_callback=None) -> str:
         for page_num in range(doc.page_count):
             try:
                 page = doc.load_page(page_num)
-                
-                # Aumentar resolução
                 mat = fitz.Matrix(2, 2)
                 pix = page.get_pixmap(matrix=mat)
-                
-                # Converter para PIL
                 img = Image.open(io.BytesIO(pix.tobytes("png")))
-                
-                # Converter para grayscale
                 img = img.convert('L')
-                
-                # Aumentar contraste
                 enhancer = ImageEnhance.Contrast(img)
                 img = enhancer.enhance(2)
                 
-                # PaddleOCR
                 resultado = PADDLE_OCR.ocr(img, cls=True)
                 
-                # Extrair texto
                 if resultado:
                     for linha in resultado:
-                        if linha:
-                            for word_info in linha:
-                                texto = word_info[1][0]
-                                if texto:
-                                    texto_acumulado.append(texto)
+                        if linha and isinstance(linha, list):
+                            for item in linha:
+                                if isinstance(item, (list, tuple)) and len(item) >= 2:
+                                    texto_str = str(item[1][0]) if isinstance(item[1], (list, tuple)) else str(item[1])
+                                    if texto_str:
+                                        texto_acumulado.append(texto_str)
                 
             except Exception as e:
-                if progress_callback:
-                    progress_callback(f"⚠️ Erro OCR página {page_num + 1}: {e}")
+                if DEBUG: print(f"Erro OCR página {page_num + 1}: {e}")
                 continue
         
         doc.close()
         return "\n".join(texto_acumulado)
     
     except Exception as e:
-        if progress_callback:
-            progress_callback(f"❌ Erro PaddleOCR: {e}")
+        if DEBUG: print(f"Erro PaddleOCR: {e}")
+        return ""
+
+def extrair_texto_easy_ocr(pdf_path: str, progress_callback=None) -> str:
+    """Extrai texto usando EasyOCR como fallback"""
+    global EASY_OCR
+    
+    texto_acumulado = []
+    
+    try:
+        if EASY_OCR is None:
+            if progress_callback:
+                progress_callback("📥 Carregando EasyOCR...")
+            EASY_OCR = carregar_easy_ocr()
+        
+        if not EASY_OCR:
+            return ""
+        
+        doc = fitz.open(pdf_path)
+        
+        for page_num in range(doc.page_count):
+            try:
+                page = doc.load_page(page_num)
+                mat = fitz.Matrix(2, 2)
+                pix = page.get_pixmap(matrix=mat)
+                img_pil = Image.open(io.BytesIO(pix.tobytes("png")))
+                
+                # Melhorar imagem
+                img_pil = img_pil.convert('RGB')
+                enhancer = ImageEnhance.Contrast(img_pil)
+                img_pil = enhancer.enhance(2)
+                
+                # EasyOCR - resultado é lista de [bbox, texto, confianca]
+                resultado = EASY_OCR.readtext(img_pil)
+                
+                if resultado:
+                    for item in resultado:
+                        if isinstance(item, (list, tuple)) and len(item) >= 2:
+                            texto_str = str(item[1]) if len(item) > 1 else ""
+                            confianca_val = float(item[2]) if len(item) > 2 else 0.0
+                            
+                            if texto_str and confianca_val > 0.3:
+                                texto_acumulado.append(texto_str)
+                
+            except Exception as e:
+                if DEBUG: print(f"Erro EasyOCR página {page_num + 1}: {e}")
+                continue
+        
+        doc.close()
+        return "\n".join(texto_acumulado)
+    
+    except Exception as e:
+        if DEBUG: print(f"Erro EasyOCR: {e}")
         return ""
 
 # =============== UTILS ===============
@@ -427,10 +478,10 @@ def extrair_capa_de_pdf(arquivo_pdf: str, progress_callback=None) -> dict:
         if progress_callback:
             progress_callback(f"⚠️ Erro ao ler PDF: {e}")
 
-    # OCR com PaddleOCR
+    # Tentar PaddleOCR primeiro
     try:
         if progress_callback:
-            progress_callback(f"🔄 Usando PaddleOCR em: {Path(arquivo_pdf).name}")
+            progress_callback(f"🔄 PaddleOCR em: {Path(arquivo_pdf).name}")
         
         texto_ocr = extrair_texto_paddle_ocr(arquivo_pdf, progress_callback)
         
@@ -440,7 +491,22 @@ def extrair_capa_de_pdf(arquivo_pdf: str, progress_callback=None) -> dict:
                 return {"arquivo": Path(arquivo_pdf).name, **dados}
     except Exception as e:
         if progress_callback:
-            progress_callback(f"❌ Falha PaddleOCR: {e}")
+            progress_callback(f"⚠️ PaddleOCR falhou: {e}")
+
+    # Fallback: Tentar EasyOCR
+    try:
+        if progress_callback:
+            progress_callback(f"🔄 EasyOCR em: {Path(arquivo_pdf).name}")
+        
+        texto_ocr = extrair_texto_easy_ocr(arquivo_pdf, progress_callback)
+        
+        if texto_ocr and len(texto_ocr.strip()) > 50:
+            dados = extrair_capa_de_texto(texto_ocr)
+            if any([dados["numero_nf"], dados["emitente_doc"], dados["dest_doc"], dados["valor_total"]]):
+                return {"arquivo": Path(arquivo_pdf).name, **dados}
+    except Exception as e:
+        if progress_callback:
+            progress_callback(f"⚠️ EasyOCR falhou: {e}")
     
     vazio = {k: None for k in [
         "numero_nf","serie","emitente_doc","emitente_nome",
