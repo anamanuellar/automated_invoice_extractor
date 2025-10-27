@@ -14,8 +14,6 @@ from ia_simples import (
     add_ia_to_streamlit
 )
 
-# Configurar o caminho do Tesseract (ajuste conforme necessário)
-pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 
 # =============== CONFIG STREAMLIT ===============
 st.set_page_config(
