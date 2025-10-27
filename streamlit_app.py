@@ -14,6 +14,12 @@ from ia_simples import (
     add_ia_to_streamlit
 )
 
+# Configurar Tesseract para português no Streamlit Cloud
+os.environ['TESSDATA_PREFIX'] = '/usr/share/tesseract-ocr/5/tessdata'
+
+# Usar inglês + português para melhor reconhecimento
+pytesseract.pytesseract.tesseract_cmd = 'tesseract'
+
 
 # =============== CONFIG STREAMLIT ===============
 st.set_page_config(
