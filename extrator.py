@@ -281,43 +281,52 @@ def extrair_capa_de_texto(texto: str) -> dict:
                 cand = m.group(1).replace(".", "")
                 try:
                     val = int(cand)
-                    # Pegar últimos 6 dígitos que importam
-                    numero_nf = str(val % 1000000)
+                    # Pegar últimos 6 dígitos (remove zeros à esquerda)
+                    numero_nf = str(val % 1000000).lstrip('0') or "0"
                 except:
                     pass
-        
-        # Série aparece logo após: "Série: 5" ou "SÉRIE:1"
-        if not serie:
-            m = re.search(r"S[ÉE]RIE\s*[:\-]?\s*(\d+)", ln, re.I)
-            if m:
-                try:
-                    val = int(m.group(1))
-                    if 0 <= val <= 999:
-                        serie = str(val)
-                except:
-                    pass
+            
+            # Se não encontrou, tentar padrão simples: "Nº 672" ou "N° 672"
+            if not numero_nf:
+                m = re.search(r"N[°ºO]\s*[:\-]?\s*(\d{1,6})(?:\D|$)", ln)
+                if m:
+                    cand = m.group(1)
+                    try:
+                        val = int(cand)
+                        if 1 <= val <= 999999:
+                            numero_nf = str(val)
+                    except:
+                        pass
 
     # ========== ESTRATÉGIA 2: Buscar EMITENTE ==========
-    # Padrão: "IDENTIFICAÇÃO DO EMITENTE" seguido do nome
+    # Procurar por "IDENTIFICAÇÃO DO EMITENTE" e depois o nome e CNPJ
     for i, ln in enumerate(linhas):
         up = ln.upper()
         
         if "IDENTIFICAÇÃO DO EMITENTE" in up:
-            # Próximas linhas têm o nome
-            for j in range(i + 1, min(i + 5, len(linhas))):
-                t = linhas[j].strip()
-                if t and len(t) > 3 and not achar_doc_em_linha(t):
-                    if not any(w in t.upper() for w in ["DANFE", "DOCUMENTO", "AUXILIAR", "BARRA", "CEP", "SALVADOR"]):
-                        emitente_nome = t
-                        break
-        
-        # CNPJ do emitente vem em linha com 14 dígitos ou formato XX.XXX.XXX/XXXX-XX
-        if not emitente_doc and "IDENTIFICAÇÃO DO EMITENTE" in up:
-            for j in range(i, min(i + 8, len(linhas))):
-                d = achar_doc_em_linha(linhas[j])
-                if d and len(somente_digitos(d)) == 14:
-                    emitente_doc = d
-                    break
+            # Próximas 10 linhas podem ter nome e CNPJ
+            for j in range(i + 1, min(i + 10, len(linhas))):
+                linha_emit = linhas[j].strip()
+                
+                # Procurar CNPJ primeiro (é mais confiável)
+                doc_emit = achar_doc_em_linha(linha_emit)
+                if doc_emit and len(somente_digitos(doc_emit)) == 14:
+                    emitente_doc = doc_emit
+                
+                # Nome vem antes do CNPJ ou em linhas separadas
+                if linha_emit and len(linha_emit) > 5:
+                    # Descartar linhas que são headers ou valores
+                    if not any(x in up for x in ["DANFE", "DOCUMENTO", "AUXILIAR", "CEP", "ENDEREÇO", "FONE", "CNPJ", "CPF"]):
+                        # Se tem CNPJ na linha, pegar o nome antes dele
+                        if doc_emit and doc_emit in linha_emit:
+                            nome_cand = linha_emit.split(doc_emit)[0].strip()
+                            if nome_cand and len(nome_cand) > 3 and nome_cand not in ["", "1", "0"]:
+                                emitente_nome = nome_cand
+                        # Se não tem CNPJ mas tem nome válido
+                        elif not emitente_doc and not doc_emit and len(linha_emit) > 5:
+                            if not re.search(r"^\d+$", linha_emit):
+                                emitente_nome = linha_emit
+            break
 
     # ========== ESTRATÉGIA 3: Buscar DESTINATÁRIO ==========
     for i, ln in enumerate(linhas):
@@ -379,29 +388,10 @@ def extrair_capa_de_texto(texto: str) -> dict:
     })
     return resultado
 
-def extrair_numero_do_filename(filename: str) -> str | None:
-    """Extrai número da NF do nome do arquivo - padrão: 'DANFE nº 672' ou 'Nº 672'"""
-    # Procurar padrões comuns em nomes de arquivo
-    patterns = [
-        r"DANFE\s*n[°ºo]\s*(\d{3,6})",  # DANFE nº 672
-        r"Nº\s*(\d{3,6})",               # Nº 672
-        r"N°\s*(\d{3,6})",               # N° 672
-        r"NF[- ]?(\d{3,6})",             # NF-672 ou NF 672
-        r"nota[- ]?(\d{3,6})",           # nota-672
-    ]
-    
-    for pattern in patterns:
-        m = re.search(pattern, filename, re.I)
-        if m:
-            return m.group(1)
-    
-    return None
+
 
 def extrair_capa_de_pdf(arquivo_pdf: str, progress_callback=None) -> dict:
     nome_arquivo = Path(arquivo_pdf).name
-    
-    # Tentar extrair número do filename como fallback
-    numero_nf_do_filename = extrair_numero_do_filename(nome_arquivo)
     
     try:
         with pdfplumber.open(arquivo_pdf) as pdf:
@@ -409,9 +399,6 @@ def extrair_capa_de_pdf(arquivo_pdf: str, progress_callback=None) -> dict:
                 txt = page.extract_text() or ""
                 if txt and len(txt.strip()) > 100:
                     dados = extrair_capa_de_texto(txt)
-                    # Se não pegou número mas tem no filename, usar
-                    if not dados["numero_nf"] and numero_nf_do_filename:
-                        dados["numero_nf"] = numero_nf_do_filename
                     
                     if any([dados["numero_nf"], dados["emitente_doc"], dados["dest_doc"], dados["valor_total"]]):
                         if progress_callback:
@@ -428,9 +415,6 @@ def extrair_capa_de_pdf(arquivo_pdf: str, progress_callback=None) -> dict:
         
         if texto_ocr and len(texto_ocr.strip()) > 100:
             dados = extrair_capa_de_texto(texto_ocr)
-            # Se não pegou número mas tem no filename, usar
-            if not dados["numero_nf"] and numero_nf_do_filename:
-                dados["numero_nf"] = numero_nf_do_filename
             
             if any([dados["numero_nf"], dados["emitente_doc"], dados["dest_doc"], dados["valor_total"]]):
                 if progress_callback:
@@ -444,10 +428,6 @@ def extrair_capa_de_pdf(arquivo_pdf: str, progress_callback=None) -> dict:
         "numero_nf","serie","emitente_doc","emitente_nome",
         "dest_doc","dest_nome","data_emissao","valor_total","valor_total_num"
     ]})
-    
-    # Mesmo que falhe, tentar pegar número do filename
-    if numero_nf_do_filename:
-        vazio["numero_nf"] = numero_nf_do_filename
     
     return {"arquivo": nome_arquivo, **vazio}
 
