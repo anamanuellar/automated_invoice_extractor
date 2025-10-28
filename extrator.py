@@ -10,6 +10,7 @@ import fitz # PyMuPDF
 from codigos_fiscais import analisar_nf
 from codigos_fiscais_destinatario import analisar_nf_como_destinatario, gerar_resumo_analise
 import json
+import traceback
 
 # ==================== CACHE HÍBRIDO (DISCO + MEMÓRIA + STREAMLIT) ====================
 
@@ -653,6 +654,7 @@ def extrair_capa_de_pdf(arquivo_pdf: str, progress_callback=None) -> dict:
     except Exception as e:
         if DEBUG:
             print(f"[DEBUG] Erro catastrófico em pdfplumber para {nome_arquivo}: {e}")
+            traceback.print_exc()
 
     # === 8️⃣ Fallback OCR ===
     try:
