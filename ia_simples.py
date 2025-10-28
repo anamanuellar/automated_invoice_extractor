@@ -4,7 +4,6 @@ import numpy as np
 from typing import Dict, List, Any, Optional, Union, Sequence 
 import warnings
 warnings.filterwarnings('ignore')
-from transformers import pipeline
 import plotly.graph_objects as go
 
 # =============== HUGGING FACE  ===============
@@ -90,13 +89,14 @@ def classify_expense_hf(description: str, confidence_threshold: float = 0.5) -> 
                 'status': 'Erro ao processar resultado'
             }
     
+    except ImportError:
+            # Se as dependências não estiverem instaladas
+            st.error("❌ Erro de dependência: A biblioteca 'transformers' não pôde ser carregada. Verifique se 'requirements.txt' está correto e se 'torch' está instalada.")
+            return {'categoria': 'ERRO', 'confianca': 0.0, 'alternativas': {}}
     except Exception as e:
-        return {
-            'categoria': 'Desconhecido',
-            'confianca': 0.0,
-            'alternativas': {},
-            'status': f'Erro: {str(e)}'
-        }
+        # Outros erros de execução ou carregamento do modelo
+        st.error(f"❌ Erro ao classificar despesa: {e}")
+        return {'categoria': 'ERRO', 'confianca': 0.0, 'alternativas': {}}
 
 
 # =============== DETECÇÃO DE ANOMALIAS ===============
