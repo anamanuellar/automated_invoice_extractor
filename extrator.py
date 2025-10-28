@@ -126,102 +126,110 @@ def consulta_cnpj_api(cnpj: str) -> Optional[str]:
 
 # ==================== NOVA FUNÇÃO: EXTRAÇÃO DE ITENS ====================
 
-# No arquivo extrator.py, substitua a função extrair_itens_da_tabela pela seguinte:
-
 def extrair_itens_da_tabela(pdf_page) -> List[Dict[str, Any]]:
     """
-    Tenta extrair a tabela de itens (produtos/serviços) da página.
-    Ajustada para máxima flexibilidade e correção de erros.
+    Extrai itens (produtos/serviços) da NF-e.
+    Faz fallback automático para extração via coordenadas se a tabela não for detectada.
     """
-    
-    # Usar a estratégia de texto (mais flexível) com tolerância
     table_settings = {
-        "vertical_strategy": "text", 
-        "horizontal_strategy": "text", 
+        "vertical_strategy": "text",
+        "horizontal_strategy": "text",
         "snap_x_tolerance": 5,
         "snap_y_tolerance": 3,
         "join_tolerance": 3,
     }
 
+    itens_extraidos: List[Dict[str, Any]] = []
+
     try:
-        # Extrai todas as tabelas da página
+        # === 1. Tentativa com extract_tables ===
         tables = pdf_page.extract_tables(table_settings)
-        
-        itens_extraidos: List[Dict[str, Any]] = []
-        
+
+        if DEBUG:
+            print(f"[DEBUG] {len(tables)} tabela(s) detectada(s) na página {pdf_page.page_number}")
+
         for table in tables:
             if not table or len(table) < 2:
                 continue
 
-            # Mapeamento dinâmico baseado em palavras-chave no cabeçalho
-            header_row_raw = table[0]
-            header_row = [str(c).upper().strip().replace('\n', ' ') for c in header_row_raw if c is not None]
-            
+            header_row = [str(c).upper().strip().replace('\n', ' ') for c in table[0] if c]
             mapa_colunas = {}
-            
-            # Tentar encontrar a melhor coluna de descrição e valor
+
             for i, col_name in enumerate(header_row):
-                if 'DESCRIÇÃO' in col_name or 'PRODUTO' in col_name or 'SERVIÇO' in col_name:
-                    if 'descricao' not in mapa_colunas:
-                        mapa_colunas['descricao'] = i
-                        
-                elif 'VALOR TOTAL' in col_name or ('TOTAL' in col_name and 'UNIT' not in col_name and 'TOT' in col_name):
+                if any(k in col_name for k in ['DESCRIÇÃO', 'PRODUTO', 'SERVIÇO']):
+                    mapa_colunas['descricao'] = i
+                elif any(k in col_name for k in ['VALOR TOTAL', 'VLR TOTAL', 'TOTAL R$', 'TOTAL']):
                     mapa_colunas['valor_total'] = i
-                
-                elif 'UNIT' in col_name and 'VALOR' in col_name and 'valor_total' not in mapa_colunas:
+                elif any(k in col_name for k in ['VALOR UNIT', 'VL UNIT', 'UNIT']):
                     mapa_colunas['valor_unit'] = i
-            
-            # Condição mínima: precisamos da descrição e de alguma coluna de valor
-            if 'descricao' in mapa_colunas and ('valor_total' in mapa_colunas or 'valor_unit' in mapa_colunas):
-                
-                # CORREÇÃO CRÍTICA DO ERRO 'Operator ">=" not supported for "None"'
-                # Usa 'mapa_colunas.get(key)' para garantir que o índice 0 (válido) não seja tratado como False
-                valor_col_index = mapa_colunas.get('valor_total')
-                if valor_col_index is None:
-                    valor_col_index = mapa_colunas.get('valor_unit')
-                
-                # Se, por segurança, valor_col_index ainda for None, pulamos esta tabela.
-                if valor_col_index is None:
+
+            if 'descricao' not in mapa_colunas:
+                continue
+
+            valor_col_index = mapa_colunas.get('valor_total', mapa_colunas.get('valor_unit'))
+            desc_col_index = mapa_colunas['descricao']
+            if valor_col_index is None:
+                continue
+
+            for row_idx, row in enumerate(table[1:], start=1):
+                if not any(row):
                     continue
-                
-                desc_col_index = mapa_colunas['descricao']
+                if valor_col_index >= len(row) or desc_col_index >= len(row):
+                    continue
 
-                # Vamos percorrer as linhas a partir da segunda (índice 1)
-                for row_idx, row in enumerate(table):
-                    if row_idx == 0: continue # Ignorar cabeçalho
+                descricao_str = str(row[desc_col_index]).strip() if row[desc_col_index] else ""
+                valor_str = str(row[valor_col_index]).strip() if row[valor_col_index] else ""
 
-                    if not any(c for c in row if c is not None):
+                # Regex mais flexível para valores
+                valor_num = moeda_to_float(valor_str)
+                if valor_num is None:
+                    match = re.search(r"(\d{1,3}(?:[\.,]\d{3})*[\.,]\d{2})", valor_str)
+                    if match:
+                        valor_num = moeda_to_float(match.group(1))
+
+                if len(descricao_str) > 4 and valor_num and valor_num > 0.01:
+                    if any(k in descricao_str.upper() for k in ["OBSERVA", "INF. COMPL", "DADOS DOS"]):
                         continue
+                    itens_extraidos.append({
+                        "descricao_item": descricao_str,
+                        "valor_item": valor_num
+                    })
 
-                    # Garantir que a linha tem o tamanho esperado
-                    # O erro foi corrigido, pois valor_col_index é garantido ser um INT aqui
-                    if valor_col_index >= len(row) or desc_col_index >= len(row): 
-                        continue
-                        
-                    descricao_raw = row[desc_col_index]
-                    valor_raw = row[valor_col_index]
-                    
-                    descricao_str = str(descricao_raw).strip() if descricao_raw else ""
-                    valor_str = str(valor_raw).strip() if valor_raw else ""
+        # === 2. Fallback: extract_words se nada foi encontrado ===
+        if not itens_extraidos:
+            words = pdf_page.extract_words()
+            linhas = {}
+            for w in words:
+                y = round(w["top"] / 5) * 5
+                linhas.setdefault(y, []).append(w["text"])
 
-                    valor_num = moeda_to_float(valor_str)
-                    
-                    if len(descricao_str) > 5 and valor_num is not None and valor_num > 0.01:
-                        
-                        if descricao_str.upper() in ["DADOS DOS", "PRODUTOS/SERVIÇOS", "OBSERVAÇÕES", "INF. COMPLEMENTARES"]:
-                            continue
-                            
-                        itens_extraidos.append({
-                            'descricao_item': descricao_str,
-                            'valor_item': valor_num
-                        })
+            for _, textos in sorted(linhas.items()):
+                linha_txt = " ".join(textos).strip()
+                if not linha_txt:
+                    continue
+                match_valor = re.search(r"(\d{1,3}(?:[\.,]\d{3})*[\.,]\d{2})", linha_txt)
+                if match_valor and not any(k in linha_txt.upper() for k in ["TOTAL", "VALOR DA NOTA"]):
+                    valor = moeda_to_float(match_valor.group(1))
+                    if valor and valor > 0:
+                        partes = linha_txt.split(match_valor.group(1))
+                        descricao = partes[0].strip() if partes else ""
+                        if len(descricao) > 4:
+                            itens_extraidos.append({
+                                "descricao_item": descricao,
+                                "valor_item": valor
+                            })
+
+        if DEBUG:
+            print(f"[DEBUG] {len(itens_extraidos)} itens extraídos da página {pdf_page.page_number}")
 
         return itens_extraidos
 
     except Exception as e:
         if DEBUG:
-            print(f"[DEBUG] Erro final na extração de itens da tabela: {e}")
+            print(f"[DEBUG] Erro na extração de itens da página {pdf_page.page_number}: {e}")
         return []
+
+
 
 # ==================== FUNÇÕES DE EXTRAÇÃO (ADAPTADAS) ====================
 
