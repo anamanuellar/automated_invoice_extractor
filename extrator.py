@@ -126,17 +126,20 @@ def consulta_cnpj_api(cnpj: str) -> Optional[str]:
 
 # ==================== NOVA FUNÇÃO: EXTRAÇÃO DE ITENS ====================
 
-def extrair_itens_da_tabela(pdf_page: Any) -> List[Dict[str, Any]]:
+def extrair_itens_da_tabela(pdf_page) -> List[Dict[str, Any]]:
     """
     Tenta extrair a tabela de itens (produtos/serviços) da página.
+    Ajustada para maior tolerância na detecção de colunas.
     """
     
-    # Configuração de detecção de tabelas para NFe padrão
-    # Muitas NFs têm 6 a 9 colunas para (Código, Descrição, Qtd, Unidade, Valor Unitário, Valor Total, etc.)
+    # Usar uma estratégia mista para ser mais flexível
     table_settings = {
-        "vertical_strategy": "lines",
-        "horizontal_strategy": "lines",
-        "snap_y_tolerance": 5, # Permite um pequeno desvio vertical
+        "vertical_strategy": "lines", # Tentar linhas verticais primeiro
+        "horizontal_strategy": "text", # Usar o alinhamento do texto para linhas horizontais
+        "snap_x_tolerance": 5,
+        "snap_y_tolerance": 5,
+        # NFe padrão muitas vezes usa headings: CÓD, PRODUTO, QTD, UN, V.UNIT, V.TOTAL
+        "explicit_vertical_lines": [], # Pode ser ajustado se soubermos a estrutura
     }
 
     try:
@@ -149,40 +152,50 @@ def extrair_itens_da_tabela(pdf_page: Any) -> List[Dict[str, Any]]:
             if not table or len(table) < 2:
                 continue
 
-            # Tentativa de identificar o cabeçalho (pode variar muito)
-            header_row = [str(c).upper().strip() for c in table[0] if c is not None]
+            # Mapeamento dinâmico baseado em palavras-chave em qualquer lugar do cabeçalho
+            header_row = [str(c).upper().strip().replace('\n', ' ') for c in table[0] if c is not None]
             
-            # Condição básica: precisa ter 'DESCRIÇÃO' e algum tipo de 'VALOR'
-            has_descricao = any('DESCRICAO' in h or 'PRODUTO' in h or 'SERVICO' in h for h in header_row)
-            has_valor = any('VALOR' in h or 'TOTAL' in h for h in header_row)
+            mapa_colunas = {}
+            
+            for i, col_name in enumerate(header_row):
+                # Palavras-chave para a descrição do item
+                if any(kw in col_name for kw in ['DESCRIÇÃO', 'PRODUTO', 'SERVIÇO', 'DENOMINAÇÃO']):
+                    mapa_colunas['descricao'] = i
+                # Palavras-chave para o valor total (evitando impostos)
+                elif any(kw in col_name for kw in ['V.TOTAL', 'VALOR TOTAL', 'TOTAL', 'LÍQUIDO']) and not any(kw in col_name for kw in ['ICMS', 'IPI', 'ISS']):
+                    mapa_colunas['valor_total'] = i
+                # Palavras-chave para a quantidade (opcional, mas ajuda a validar)
+                elif any(kw in col_name for kw in ['QUANTIDADE', 'QTDE', 'QTD']):
+                    mapa_colunas['quantidade'] = i
+            
+            # Condição mínima: precisamos da descrição e do valor total
+            if 'descricao' in mapa_colunas and 'valor_total' in mapa_colunas:
+                
+                # Vamos percorrer as linhas a partir da segunda (índice 1)
+                for row_idx, row in enumerate(table):
+                    if row_idx == 0: continue # Ignorar cabeçalho
 
-            if has_descricao and has_valor:
-                # Mapear as colunas de interesse
-                mapa_colunas = {}
-                for i, col_name in enumerate(header_row):
-                    if 'DESCRICAO' in col_name or 'PRODUTO' in col_name or 'SERVICO' in col_name:
-                        mapa_colunas['descricao'] = i
-                    elif 'VALOR' in col_name and not any(k in col_name for k in ['ICMS', 'IPI']):
-                        mapa_colunas['valor_total'] = i
-                    elif 'QUANT' in col_name or 'QTDE' in col_name:
-                        mapa_colunas['quantidade'] = i
-
-                if 'descricao' in mapa_colunas and 'valor_total' in mapa_colunas:
-                    for row_idx, row in enumerate(table):
-                        if row_idx == 0: continue # Ignorar cabeçalho
-
-                        descricao_raw = row[mapa_colunas['descricao']] if mapa_colunas['descricao'] < len(row) and row[mapa_colunas['descricao']] else None
-                        valor_raw = row[mapa_colunas['valor_total']] if mapa_colunas['valor_total'] < len(row) and row[mapa_colunas['valor_total']] else None
+                    # Garantir que a linha tenha pelo menos o tamanho do índice máximo
+                    if max(mapa_colunas.values()) >= len(row):
+                        continue
                         
-                        descricao_str = str(descricao_raw).strip() if descricao_raw else ""
-                        valor_str = str(valor_raw).strip() if valor_raw else ""
+                    descricao_raw = row[mapa_colunas['descricao']]
+                    valor_raw = row[mapa_colunas['valor_total']]
+                    
+                    descricao_str = str(descricao_raw).strip() if descricao_raw else ""
+                    valor_str = str(valor_raw).strip() if valor_raw else ""
 
-                        # Validação básica
-                        if len(descricao_str) > 5 and moeda_to_float(valor_str) is not None:
-                            itens_extraidos.append({
-                                'descricao_item': descricao_str,
-                                'valor_item': moeda_to_float(valor_str)
-                            })
+                    # Validação: Descrição deve ter mais de 5 caracteres E o valor deve ser numérico
+                    if len(descricao_str) > 5 and moeda_to_float(valor_str) is not None:
+                        
+                        # Tenta capturar o valor total da NF se a linha for o totalizador
+                        if descricao_str.upper() in ["VALOR TOTAL DA NOTA", "TOTAL GERAL", "VALOR TOTAL"]:
+                            continue
+                            
+                        itens_extraidos.append({
+                            'descricao_item': descricao_str,
+                            'valor_item': moeda_to_float(valor_str)
+                        })
 
         return itens_extraidos
 
@@ -190,7 +203,7 @@ def extrair_itens_da_tabela(pdf_page: Any) -> List[Dict[str, Any]]:
         if DEBUG:
             print(f"[DEBUG] Erro na extração de itens da tabela: {e}")
         return []
-
+    
 # ==================== FUNÇÕES DE EXTRAÇÃO (ADAPTADAS) ====================
 
 def extrair_capa_de_texto(texto: str) -> dict:
