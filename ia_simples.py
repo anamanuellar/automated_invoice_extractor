@@ -376,39 +376,98 @@ def add_ia_to_streamlit(df: pd.DataFrame) -> None:
     
     # TAB 2: Anomalias
     with tab2:
-        st.markdown("### Detecção de Anomalias")
+        st.markdown("### 🚨 Detecção de Anomalias de Valor")
+        st.info("Utiliza o Isolation Forest para identificar Notas Fiscais com valores atípicos.")
+
+        df_anomalia = df.copy()
         
-        # O Pylance agora deve reconhecer detect_anomalies
-        if not df.empty and 'valor_total_num' in df.columns:
-            # Converter para lista de floats
-            valores_raw = df['valor_total_num'].dropna().tolist()
-            valores = [float(v) for v in valores_raw if v is not None]
+        # Opções de segmentação
+        segmentacao = st.radio(
+            "Analisar por:",
+            ["Total Geral", "Por Fornecedor (Emitente)"],
+            horizontal=True
+        )
+
+        valores_limpos = df_anomalia.dropna(subset=['valor_total_num'])
+
+        if valores_limpos.empty or len(valores_limpos) < 5:
+            st.warning("Dados insuficientes (mínimo de 5 notas com valor válido) para análise de anomalias.")
             
-            if len(valores) > 5:
+        else:
+            if segmentacao == "Total Geral":
+                # Aplica a análise ao total geral (código existente)
+                valores = valores_limpos['valor_total_num'].tolist()
                 resultado = detect_anomalies(valores)
                 
-                col1, col2, col3 = st.columns(3)
+                anomalias_df = pd.DataFrame(resultado.get('anomalias', [])).rename(columns={'valor': 'Valor Total (R$)'})
                 
-                with col1:
-                    st.metric("Total de NFs", len(valores))
-                with col2:
-                    st.metric("Anomalias", resultado.get('total_anomalias', 0))
-                with col3:
-                    st.metric("Valor Médio", f"R$ {resultado.get('valor_medio', 0):.2f}")
-                
-                anomalias = resultado.get('anomalias', [])
-                if anomalias:
-                    st.warning("🚨 Anomalias Detectadas:")
-                    for anom in anomalias:
-                        st.error(
-                            f"Índice #{anom.get('indice', 'N/A')}: "
-                            f"R$ {anom.get('valor', 0):.2f} "
-                            f"({anom.get('desvio_percentual', 0):+.1f}% do padrão)"
-                        )
+                if not anomalias_df.empty:
+                    # Adicionar detalhes da NF que é anômala
+                # 1. Pega os índices posicionais das anomalias
+                    indices_posicionais = anomalias_df['indice'].to_numpy()
+                    
+                    # 2. Pega os índices reais do DataFrame limpo e usa np.take para selecionar
+                    #    apenas os índices que correspondem às anomalias (indices_posicionais)
+                    indices_reais = valores_limpos.index.to_numpy().take(indices_posicionais)
+                    
+                    # 3. Atribui o índice real de volta ao DataFrame de anomalias
+                    anomalias_df['índice_original'] = indices_reais
+                    
+                    # ====================================================================
+                    
+                    anomalias_finais = df_anomalia.loc[anomalias_df['índice_original'], ['data_emissao', 'emitente_nome', 'numero_nf', 'valor_total_num']]
+                    anomalias_finais = anomalias_finais.merge(anomalias_df[['índice_original', 'desvio_percentual']], on='índice_original', how='left')
+                    
+                    st.warning(f"Foram detectadas **{len(anomalias_finais)}** anomalias no *Total Geral*:")
+                    st.dataframe(anomalias_finais.rename(columns={'valor_total_num': 'Valor Anômalo (R$)', 'desvio_percentual': 'Desvio (%)'}).drop(columns='índice_original'), use_container_width=True)
                 else:
-                    st.success("✅ Nenhuma anomalia detectada")
-            else:
-                st.info("Envie mais NFs para detectar anomalias")
+                    st.success("✅ Nenhuma anomalia significativa detectada no Total Geral.")
+
+            elif segmentacao == "Por Fornecedor (Emitente)":
+                st.markdown("---")
+                anomalias_por_fornecedor = []
+                
+                # Agrupamento para análise segmentada
+                grupos = valores_limpos.groupby('emitente_nome')
+                
+                with st.spinner("Analisando anomalias por fornecedor..."):
+                    for nome_fornecedor, grupo_df in grupos:
+                        if len(grupo_df) >= 5: # Mínimo de 5 notas por fornecedor para análise
+                            valores = grupo_df['valor_total_num'].tolist()
+                            resultado = detect_anomalies(valores)
+                            
+                            anomalias_encontradas = resultado.get('anomalias', [])
+                            
+                            if anomalias_encontradas:
+                                # Mapear o índice da anomalia de volta para o DataFrame original
+                                for anomalia in anomalias_encontradas:
+                                    idx_anomalia_no_grupo = anomalia['indice']
+                                    
+                                    # Pega o índice real do DataFrame original
+                                    indice_real = grupo_df.iloc[[idx_anomalia_no_grupo]].index[0] 
+                                    
+                                    # Pega a linha completa do DF original
+                                    linha_original = df_anomalia.loc[indice_real]
+                                    
+                                    anomalias_por_fornecedor.append({
+                                        'Fornecedor': nome_fornecedor,
+                                        'Data': linha_original['data_emissao'],
+                                        'NF Número': linha_original['numero_nf'],
+                                        'Valor Anômalo (R$)': linha_original['valor_total_num'],
+                                        'Desvio (%)': anomalia['desvio_percentual']
+                                    })
+                
+                if anomalias_por_fornecedor:
+                    df_segmentado = pd.DataFrame(anomalias_por_fornecedor)
+                    
+                    # Formatação
+                    df_segmentado['Valor Anômalo (R$)'] = df_segmentado['Valor Anômalo (R$)'].map('R$ {:,.2f}'.format)
+                    df_segmentado['Desvio (%)'] = df_segmentado['Desvio (%)'].map('{:+.1f}%'.format)
+
+                    st.warning(f"Foram detectadas **{len(df_segmentado)}** anomalias em fornecedores:")
+                    st.dataframe(df_segmentado, use_container_width=True)
+                else:
+                    st.success("✅ Nenhuma anomalia significativa detectada por fornecedor.")
     
     # TAB 3: Análise de Fornecedores
     with tab3:
