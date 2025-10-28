@@ -1,3 +1,4 @@
+# extrator_final.py - Extrator robusto para NFes (texto + imagem + OCR melhorado)
 import os, io, re, requests, time
 from pathlib import Path
 from datetime import datetime
@@ -5,15 +6,55 @@ from typing import Any, cast
 
 import pdfplumber
 import pandas as pd
+from PIL import Image, ImageEnhance, ImageOps
+import fitz  # PyMuPDF
 
 # =============== CONFIG ===============
-DEBUG = True
+DEBUG = False
 CNPJ_CACHE: dict[str, dict] = {}
 
 # =============== REGEX ===============
 RE_MOEDA = re.compile(r"R?\$?\s*(\d{1,3}(?:\.\d{3})*,\d{2})")
 RE_DATA  = re.compile(r"\b\d{2}/\d{2}/\d{4}\b")
 
+RE_NF_MAIN   = re.compile(r"NOTA\s+FISCAL\s+ELETR[ÔO]NICA\s*N[ºO]?\s*([\d\.]+)", re.I)
+RE_NF_ALT    = re.compile(r"\b(?:NF-?E|N[ºO]|NUM(?:ERO)?|NRO)\s*[:\-]?\s*([\d\.]+)", re.I)
+RE_NF_NUMERO = re.compile(r"N[ºO\.]?\s*[:\-]?\s*(\d{1,6})", re.I)
+
+RE_SERIE   = re.compile(r"S[ÉE]RIE\s*[:\-]?\s*([0-9\.]{1,5})", re.I)
+RE_SERIE_ALT = re.compile(r"(?:^|\n)S[ÉE]RIE\s*[:\-]?\s*(\d+)", re.I)
+
+RE_CNPJ_MASK   = re.compile(r"\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}")
+RE_CNPJ_PLAIN  = re.compile(r"\b\d{14}\b")
+RE_CPF_MASK    = re.compile(r"\b\d{3}\.\d{3}\.\d{3}-\d{2}\b")
+RE_CPF_PLAIN   = re.compile(r"\b\d{11}\b")
+
+IGNORAR_NOMES_EMIT = {
+    "DANFE","DOCUMENTO","AUXILIAR","NOTA","FISCAL","ELETRÔNICA","ELETRONICA",
+    "DOCUMENTO AUXILIAR DA","NOTA FISCAL","DOCUMENTO AUXILIAR"
+}
+
+HEADER_KEYWORDS = {
+    "NOME","RAZÃO","RAZAO","CNPJ","CPF","DATA","ENDEREÇO","ENDERECO",
+    "INSCRIÇÃO","INSCRICAO","CEP","MUNICÍPIO","MUNICIPIO","BAIRRO",
+    "DISTRITO","FONE","FAX","HORA","UF","NATUREZA DA OPERAÇÃO","PROTOCOLO",
+    "CHAVE DE ACESSO","SEFAZ","SITE","DANFE"
+}
+
+HEADERS = {"User-Agent": "NF-Cover-Extractor/1.0"}
+
+EASY_OCR = None
+
+def carregar_easy_ocr():
+    """Carrega EasyOCR"""
+    try:
+        import easyocr
+        reader = easyocr.Reader(['pt', 'en'], gpu=False)
+        return reader
+    except:
+        return None
+
+# =============== UTILS ===============
 def somente_digitos(s: str | Any) -> str:
     s_str = str(s) if s is not None else ""
     return re.sub(r"\D", "", s_str or "")
@@ -23,17 +64,28 @@ def fmt_cnpj(cnpj_digits: str) -> str:
     if len(d) != 14: return cnpj_digits
     return f"{d[0:2]}.{d[2:5]}.{d[5:8]}/{d[8:12]}-{d[12:14]}"
 
+def fmt_cpf(cpf_digits: str) -> str:
+    d = somente_digitos(cpf_digits)
+    if len(d) != 11: return cpf_digits
+    return f"{d[0:3]}.{d[3:6]}.{d[6:9]}-{d[9:11]}"
+
 def achar_doc_em_linha(s: str) -> str | None:
-    m = re.search(r"\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}", s)
+    m = RE_CNPJ_MASK.search(s) or RE_CPF_MASK.search(s)
     if m: return m.group(0)
-    m = re.search(r"\b\d{14}\b", s)
+    m = RE_CNPJ_PLAIN.search(s)
     if m: return fmt_cnpj(m.group(0))
+    m = RE_CPF_PLAIN.search(s)
+    if m: return fmt_cpf(m.group(0))
     return None
 
 def moeda_to_float(s: str | None) -> float | None:
     if not s: return None
     try: return float(s.replace(".", "").replace(",", "."))
     except: return None
+
+def is_headerish(s: str) -> bool:
+    up = s.upper()
+    return any(k in up for k in HEADER_KEYWORDS)
 
 def pick_last_money_on_same_or_next_lines(linhas, idx, max_ahead=6):
     def pick(line):
@@ -48,21 +100,6 @@ def pick_last_money_on_same_or_next_lines(linhas, idx, max_ahead=6):
         v = pick(linhas[k])
         if v: return v
     return None
-
-# =============== ROTAÇÃO ===============
-def detectar_rotacao(texto: str) -> bool:
-    """Detecta se o PDF tem partes rotacionadas"""
-    # Se tem MAIS padrões invertidos que normais, considerar rotacionado
-    padroes_invertidos = ["e-FN", ".odal", "adacidni"]
-    padroes_normais = ["NF-e", "valor", "indicada"]
-    
-    inv_count = sum(1 for p in padroes_invertidos if p in texto)
-    norm_count = sum(1 for p in padroes_normais if p in texto)
-    
-    # Se tem mais padrões invertidos OU tem muitos padrões invertidos, considerar rotação
-    if inv_count > norm_count or inv_count >= 2:
-        return True
-    return False
 
 # =============== CNPJ ===============
 def calcula_dvs_cnpj(base12: str) -> tuple[int,int]:
@@ -90,12 +127,39 @@ def cnpj_raiz_0001(cnpj_digits: str) -> str:
 def _try_brasilapi(cnpj14: str) -> dict | None:
     try:
         url = f"https://brasilapi.com.br/api/cnpj/v1/{cnpj14}"
-        r = requests.get(url, timeout=10)
+        r = requests.get(url, headers=HEADERS, timeout=10)
         if r.status_code == 200:
             data = r.json()
             razao = data.get("razao_social") or data.get("nome_fantasia")
             if razao:
                 return {"nome": razao, "fonte": "brasilapi"}
+    except:
+        pass
+    return None
+
+def _try_publica(cnpj14: str) -> dict | None:
+    try:
+        url = f"https://publica.cnpj.ws/cnpj/{cnpj14}"
+        r = requests.get(url, headers=HEADERS, timeout=12)
+        if r.status_code == 200:
+            data = r.json()
+            razao = data.get("razao_social") or (data.get("estabelecimento") or {}).get("razao_social")
+            if razao:
+                return {"nome": razao, "fonte": "publica"}
+    except:
+        pass
+    return None
+
+def _try_receitaws(cnpj14: str) -> dict | None:
+    try:
+        url = f"https://www.receitaws.com.br/v1/cnpj/{cnpj14}"
+        r = requests.get(url, headers=HEADERS, timeout=12)
+        if r.status_code == 200:
+            data = r.json()
+            if (data.get("status") or "").upper() == "OK":
+                nome = data.get("nome") or data.get("fantasia")
+                if nome:
+                    return {"nome": nome, "fonte": "receitaws"}
     except:
         pass
     return None
@@ -106,28 +170,108 @@ def consulta_nome_por_cnpj(cnpj_raw: str, usar_raiz=True) -> str | None:
     d = somente_digitos(cnpj_raw)
     if len(d) != 14:
         return None
+
     if usar_raiz:
         d = cnpj_raiz_0001(d)
+
     if d in CNPJ_CACHE:
         return CNPJ_CACHE[d].get("nome")
-    data = _try_brasilapi(d)
-    if data and data.get("nome"):
-        CNPJ_CACHE[d] = data
-        return data.get("nome")
-    time.sleep(0.1)
+
+    for fn in (_try_brasilapi, _try_publica, _try_receitaws):
+        data = fn(d)
+        if data and data.get("nome"):
+            CNPJ_CACHE[d] = data
+            return data.get("nome")
+        time.sleep(0.2)
+
     CNPJ_CACHE[d] = {"nome": None, "fonte": None}
     return None
 
+# =============== PROCESSAMENTO DE IMAGEM ===============
+def melhorar_imagem_para_ocr(img: Image.Image) -> Image.Image:
+    """Melhora imagem para OCR usando apenas PIL"""
+    try:
+        img = img.convert('RGB')
+        
+        # Aumentar resolução
+        img = img.resize((img.width * 2, img.height * 2), Image.Resampling.LANCZOS)
+        
+        # Aumentar contraste
+        enhancer = ImageEnhance.Contrast(img)
+        img = enhancer.enhance(2)
+        
+        # Aumentar brilho se necessário
+        enhancer_brightness = ImageEnhance.Brightness(img)
+        img = enhancer_brightness.enhance(1.1)
+        
+        # Aumentar nitidez
+        enhancer_sharp = ImageEnhance.Sharpness(img)
+        img = enhancer_sharp.enhance(2)
+        
+        return img
+    except:
+        return img
 
+def extrair_texto_ocr(pdf_path: str, progress_callback=None) -> str:
+    """Extrai texto com EasyOCR e trata rotação"""
+    global EASY_OCR
+    
+    texto_acumulado = []
+    
+    try:
+        if EASY_OCR is None:
+            if progress_callback:
+                progress_callback("📥 Carregando EasyOCR...")
+            EASY_OCR = carregar_easy_ocr()
+        
+        if not EASY_OCR:
+            return ""
+        
+        doc = fitz.open(pdf_path)
+        
+        for page_num in range(doc.page_count):
+            try:
+                page = doc.load_page(page_num)
+                
+                # Verificar rotação e corrigir se necessário
+                rotacao = page.rotation
+                if rotacao != 0:
+                    page.set_rotation((360 - rotacao) % 360)
+                
+                # Extrair como imagem com alta resolução
+                mat = fitz.Matrix(3, 3)
+                pix = page.get_pixmap(matrix=mat)
+                img = Image.open(io.BytesIO(pix.tobytes("png")))
+                
+                # Melhorar imagem
+                img = melhorar_imagem_para_ocr(img)
+                
+                # OCR
+                resultado = EASY_OCR.readtext(img)
+                
+                if resultado:
+                    for item in resultado:
+                        if isinstance(item, (list, tuple)) and len(item) >= 2:
+                            texto_str = str(item[1]) if len(item) > 1 else ""
+                            confianca_val = float(item[2]) if len(item) > 2 else 0.0
+                            
+                            if texto_str and len(texto_str.strip()) > 0 and confianca_val > 0.2:
+                                texto_acumulado.append(texto_str)
+                
+            except Exception as e:
+                if DEBUG: print(f"Erro OCR página {page_num + 1}: {e}")
+                continue
+        
+        doc.close()
+        return "\n".join(texto_acumulado)
+    
+    except Exception as e:
+        if DEBUG: print(f"Erro EasyOCR: {e}")
+        return ""
+
+# =============== EXTRAÇÃO DE TEXTO ===============
 def extrair_capa_de_texto(texto: str) -> dict:
-    """Extrai dados da capa com reconhecimento de seções"""
-    
-    # Se detectar rotação, inverter TODO o texto ANTES de dividir
-    if detectar_rotacao(texto):
-        if DEBUG:
-            print("  🔄 Rotação detectada, invertendo texto...")
-        texto = texto[::-1]  # Inverter string inteira
-    
+    """Extrai dados de DANFE com suporte a múltiplos layouts"""
     numero_nf: str | None = None
     serie: str | None = None
     emitente_nome: str | None = None
@@ -139,115 +283,108 @@ def extrair_capa_de_texto(texto: str) -> dict:
 
     linhas = texto.split("\n")
 
-    # ========== PASSO 1: Procurar campos diretos nos primeiros 50 linhas ==========
-    primeiras_linhas = "\n".join(linhas[:50])
-    
-    # Número da NF
-    m = re.search(r"N[°ºO]\.?\s*[:\-]?\s*(\d{1,3}\.\d{1,3}\.\d{3,6})", primeiras_linhas)
-    if m:
-        cand = m.group(1).replace(".", "")
-        numero_nf = str(int(cand))
-        if DEBUG:
-            print(f"    ✓ NF: {numero_nf}")
-    
-    # Série
-    m = re.search(r"S[ÉE]RIE\s*[:\-]?\s*(\d+)", primeiras_linhas, re.I)
-    if m:
-        serie = m.group(1)
-        if DEBUG:
-            print(f"    ✓ Série: {serie}")
-    
-    # Data
-    m = re.search(r"(?:Emiss[ãa]o|Data)\s*[:\-]?\s*(\d{2}/\d{2}/\d{4})", primeiras_linhas, re.I)
-    if m:
-        data_emissao = m.group(1)
-    else:
-        m = RE_DATA.search(primeiras_linhas)
-        if m:
-            data_emissao = m.group(0)
-    
-    if DEBUG and data_emissao:
-        print(f"    ✓ Data: {data_emissao}")
-    
-    # Valor
-    m = re.search(r"Valor\s+Total\s*[:\-]?\s*R\$?\s*(\d{1,3}(?:\.\d{3})*,\d{2})", primeiras_linhas, re.I)
-    if not m:
-        m = re.search(r"Total\s*[:\-]?\s*R\$?\s*(\d{1,3}(?:\.\d{3})*,\d{2})", primeiras_linhas, re.I)
-    if m:
-        valor_total = m.group(1)
-        if DEBUG:
-            print(f"    ✓ Valor: {valor_total}")
-    
-    # Destinatário
-    m = re.search(r"Destinat[áa]rio\s*[:\-]?\s*([A-Z][A-Z0-9 \.,]+?)(?:\n|$)", primeiras_linhas, re.I)
-    if m:
-        dest_cand = m.group(1).strip()
-        if len(dest_cand) > 3 and "DANFE" not in dest_cand.upper():
-            dest_nome = dest_cand
-            if DEBUG:
-                if dest_nome:
-                    print(f"    ✓ Dest: {dest_nome[:40]}")
+    # ========== ESTRATÉGIA 1: Buscar "Nº.: XXX.XXX.###" (layout mais comum) ==========
+    for ln in linhas:
+        if not numero_nf:
+            # Padrão: "Nº.: 000.094.615" ou "Nº.: 000.000.671"
+            m = re.search(r"N[°ºO]\.\s*[:\-]?\s*(\d{3}\.\d{3}\.\d{3,6})", ln)
+            if m:
+                cand = m.group(1).replace(".", "")
+                try:
+                    val = int(cand)
+                    # Pegar últimos 6 dígitos (remove zeros à esquerda)
+                    numero_nf = str(val % 1000000).lstrip('0') or "0"
+                except:
+                    pass
+            
+            # Se não encontrou, tentar padrão simples: "Nº 672" ou "N° 672"
+            if not numero_nf:
+                m = re.search(r"N[°ºO]\s*[:\-]?\s*(\d{1,6})(?:\D|$)", ln)
+                if m:
+                    cand = m.group(1)
+                    try:
+                        val = int(cand)
+                        if 1 <= val <= 999999:
+                            numero_nf = str(val)
+                    except:
+                        pass
 
-    # ========== PASSO 2: EMITENTE ==========
+    # ========== ESTRATÉGIA 2: Buscar EMITENTE ==========
+    # Procurar por "IDENTIFICAÇÃO DO EMITENTE" e depois o nome e CNPJ
     for i, ln in enumerate(linhas):
-        if "IDENTIFICAÇÃO DO EMITENTE" in ln.upper():
-            for j in range(i + 1, min(i + 12, len(linhas))):
-                linha = linhas[j].strip()
-                if not linha:
-                    continue
-                linha_up = linha.upper()
+        up = ln.upper()
+        
+        if "IDENTIFICAÇÃO DO EMITENTE" in up:
+            # Próximas 10 linhas podem ter nome e CNPJ
+            for j in range(i + 1, min(i + 10, len(linhas))):
+                linha_emit = linhas[j].strip()
                 
-                if any(x in linha_up for x in ["DANFE", "DOCUMENTO", "NOTA", "ELETRÔNICA", "ENTRADA", "SAÍDA"]):
-                    continue
+                # Procurar CNPJ primeiro (é mais confiável)
+                doc_emit = achar_doc_em_linha(linha_emit)
+                if doc_emit and len(somente_digitos(doc_emit)) == 14:
+                    emitente_doc = doc_emit
                 
-                doc = achar_doc_em_linha(linha)
-                if doc and len(somente_digitos(doc)) == 14:
-                    emitente_doc = doc
-                    if DEBUG:
-                        print(f"    ✓ CNPJ Emit: {emitente_doc}")
-                    break
-                
-                if len(linha) > 5 and not emitente_nome:
-                    if "CEP" not in linha_up and "FONE" not in linha_up:
-                        emitente_nome = linha
-                        if DEBUG:
-                            print(f"    ✓ Nome Emit: {emitente_nome[:40]}")
+                # Nome vem antes do CNPJ ou em linhas separadas
+                if linha_emit and len(linha_emit) > 5:
+                    # Descartar linhas que são headers ou valores
+                    if not any(x in up for x in ["DANFE", "DOCUMENTO", "AUXILIAR", "CEP", "ENDEREÇO", "FONE", "CNPJ", "CPF"]):
+                        # Se tem CNPJ na linha, pegar o nome antes dele
+                        if doc_emit and doc_emit in linha_emit:
+                            nome_cand = linha_emit.split(doc_emit)[0].strip()
+                            if nome_cand and len(nome_cand) > 3 and nome_cand not in ["", "1", "0"]:
+                                emitente_nome = nome_cand
+                        # Se não tem CNPJ mas tem nome válido
+                        elif not emitente_doc and not doc_emit and len(linha_emit) > 5:
+                            if not re.search(r"^\d+$", linha_emit):
+                                emitente_nome = linha_emit
             break
 
-    # ========== PASSO 3: DESTINATÁRIO ==========
-    if not dest_doc:
-        for i, ln in enumerate(linhas):
-            if "DESTINATÁRIO" in ln.upper() or "REMETENTE" in ln.upper():
-                for j in range(i + 1, min(i + 8, len(linhas))):
-                    linha = linhas[j].strip()
-                    if not linha:
-                        continue
-                    linha_up = linha.upper()
-                    
-                    doc = achar_doc_em_linha(linha)
-                    if doc and len(somente_digitos(doc)) == 14:
-                        dest_doc = doc
-                        if DEBUG:
-                            print(f"    ✓ CNPJ Dest: {dest_doc}")
-                        if doc in linha:
-                            nome_cand = linha.split(doc)[0].strip()
-                            if nome_cand and len(nome_cand) > 3:
-                                dest_nome = nome_cand
-                        break
-                    
-                    if "RAZÃO" not in linha_up and "CNPJ" not in linha_up and len(linha) > 5:
-                        if "RUA" not in linha_up and "ENDERECO" not in linha_up:
-                            dest_nome = linha
-                break
+    # ========== ESTRATÉGIA 3: Buscar DESTINATÁRIO ==========
+    for i, ln in enumerate(linhas):
+        up = ln.upper()
+        
+        if "DESTINATÁRIO" in up or "REMETENTE" in up:
+            # Próximas linhas têm razão social e CNPJ
+            for j in range(i + 1, min(i + 6, len(linhas))):
+                linha_dest = linhas[j]
+                
+                # Procurar CNPJ
+                doc_dest = achar_doc_em_linha(linha_dest)
+                if doc_dest and len(somente_digitos(doc_dest)) == 14:
+                    dest_doc = doc_dest
+                    # Tentar extrair nome da mesma linha antes do CNPJ
+                    partes = linha_dest.split(doc_dest)
+                    if partes[0].strip():
+                        dest_nome = partes[0].strip()
 
-    # ========== PASSO 4: VALOR TOTAL (fallback) ==========
-    if not valor_total:
-        for i, ln in enumerate(linhas):
-            if "VALOR TOTAL DA NOTA" in ln.upper():
-                v = pick_last_money_on_same_or_next_lines(linhas, i, 2)
-                if v:
-                    valor_total = v
-                    break
+    # ========== ESTRATÉGIA 4: Buscar DATA DE EMISSÃO ==========
+    for ln in linhas:
+        if not data_emissao:
+            md = RE_DATA.search(ln)
+            if md:
+                dd, mm, yyyy = md.group(0).split("/")
+                try:
+                    if 2006 <= int(yyyy) <= 2035:
+                        data_emissao = md.group(0)
+                except:
+                    pass
+
+    # ========== ESTRATÉGIA 5: Buscar VALOR TOTAL ==========
+    for i, ln in enumerate(linhas):
+        up = ln.upper()
+        
+        # "VALOR TOTAL DA NOTA" é o padrão mais confiável
+        if "VALOR TOTAL DA NOTA" in up:
+            v = pick_last_money_on_same_or_next_lines(linhas, i, 3)
+            if v:
+                valor_total = v
+                break
+        
+        # Alternativa: "V. TOTAL PRODUTOS"
+        if not valor_total and "V. TOTAL" in up and "PRODUTOS" in up:
+            v = pick_last_money_on_same_or_next_lines(linhas, i, 2)
+            if v:
+                valor_total = v
 
     resultado = cast(dict[str, Any], {
         "numero_nf": numero_nf,
@@ -260,12 +397,11 @@ def extrair_capa_de_texto(texto: str) -> dict:
         "valor_total": valor_total,
         "valor_total_num": moeda_to_float(valor_total),
     })
-    
     return resultado
 
 
+
 def extrair_capa_de_pdf(arquivo_pdf: str, progress_callback=None) -> dict:
-    """Extrai informações da capa do PDF"""
     nome_arquivo = Path(arquivo_pdf).name
     
     try:
@@ -277,11 +413,27 @@ def extrair_capa_de_pdf(arquivo_pdf: str, progress_callback=None) -> dict:
                     
                     if any([dados["numero_nf"], dados["emitente_doc"], dados["dest_doc"], dados["valor_total"]]):
                         if progress_callback:
-                            progress_callback(f"✅ {nome_arquivo}")
+                            progress_callback(f"✅ pdfplumber: {nome_arquivo}")
                         return {"arquivo": nome_arquivo, **dados}
+    except:
+        pass
+
+    try:
+        if progress_callback:
+            progress_callback(f"🔄 OCR: {nome_arquivo}")
+        
+        texto_ocr = extrair_texto_ocr(arquivo_pdf, progress_callback)
+        
+        if texto_ocr and len(texto_ocr.strip()) > 100:
+            dados = extrair_capa_de_texto(texto_ocr)
+            
+            if any([dados["numero_nf"], dados["emitente_doc"], dados["dest_doc"], dados["valor_total"]]):
+                if progress_callback:
+                    progress_callback(f"✅ OCR: {nome_arquivo}")
+                return {"arquivo": nome_arquivo, **dados}
     except Exception as e:
         if progress_callback:
-            progress_callback(f"❌ {str(e)}")
+            progress_callback(f"❌ {e}")
     
     vazio = cast(dict[str, Any], {k: None for k in [
         "numero_nf","serie","emitente_doc","emitente_nome",
@@ -290,31 +442,30 @@ def extrair_capa_de_pdf(arquivo_pdf: str, progress_callback=None) -> dict:
     
     return {"arquivo": nome_arquivo, **vazio}
 
-
 def enriquecer_com_cnpj(df: pd.DataFrame, progress_callback=None) -> pd.DataFrame:
-    """Enriquece dados com nomes dos CNPJs"""
     for idx in df.index:
         em_doc = df.loc[idx, "emitente_doc"]
-        if em_doc and not df.loc[idx, "emitente_nome"]:
-            nome_cnpj = consulta_nome_por_cnpj(str(em_doc), usar_raiz=True)
-            if nome_cnpj:
-                if progress_callback:
-                    progress_callback(f"✓ Emit: {nome_cnpj}")
-                df.loc[idx, "emitente_nome"] = nome_cnpj
+        if em_doc:
+            cnpj_digits = somente_digitos(em_doc)
+            if len(cnpj_digits) == 14:
+                nome_cnpj = consulta_nome_por_cnpj(cnpj_digits, usar_raiz=True)
+                if nome_cnpj:
+                    if df.loc[idx, "emitente_nome"] != nome_cnpj:
+                        if progress_callback:
+                            progress_callback(f"✓ {nome_cnpj}")
+                        df.loc[idx, "emitente_nome"] = nome_cnpj
 
         de_doc = df.loc[idx, "dest_doc"]
-        if de_doc and not df.loc[idx, "dest_nome"]:
-            nome_cnpj = consulta_nome_por_cnpj(str(de_doc), usar_raiz=True)
-            if nome_cnpj:
-                if progress_callback:
-                    progress_callback(f"✓ Dest: {nome_cnpj}")
-                df.loc[idx, "dest_nome"] = nome_cnpj
-    
+        if de_doc:
+            d_digits = somente_digitos(de_doc)
+            if len(d_digits) == 14:
+                nome_cnpj = consulta_nome_por_cnpj(d_digits, usar_raiz=True)
+                if nome_cnpj:
+                    if df.loc[idx, "dest_nome"] != nome_cnpj:
+                        df.loc[idx, "dest_nome"] = nome_cnpj
     return df
 
-
 def processar_pdfs(arquivos_pdf: list, progress_callback=None) -> pd.DataFrame:
-    """Processa lista de PDFs"""
     regs = []
     for i, pdf_path in enumerate(arquivos_pdf, 1):
         if progress_callback:
@@ -335,26 +486,8 @@ def processar_pdfs(arquivos_pdf: list, progress_callback=None) -> pd.DataFrame:
     
     return df
 
-
-# =============== TESTE =================
-if __name__ == "__main__":
-    print("🧪 Testando extrator...\n")
-    
-    pdfs = [
-        "/mnt/user-data/uploads/DANFE_DELL_COMPUTADORES_DO_BRASIL_LTDA_-_nº_7686026.pdf",
-        "/mnt/user-data/uploads/DANFE_EBAZAR_-_Nº_54013637.pdf",
-    ]
-    
-    def callback(msg):
-        print(f"  {msg}")
-    
-    df = processar_pdfs(pdfs, callback)
-    
-    print("\n" + "="*100)
-    print("RESULTADOS:")
-    print("="*100)
-    print(df.to_string())
-    
-    # Salvar em CSV
-    df.to_csv("/mnt/user-data/outputs/resultados_finais.csv", index=False)
-    print("\n✅ Salvo em: /mnt/user-data/outputs/resultados_finais.csv")
+def exportar_para_excel(df: pd.DataFrame) -> bytes:
+    output = io.BytesIO()
+    df.to_excel(output, index=False, engine='openpyxl')
+    output.seek(0)
+    return output.getvalue()
