@@ -496,20 +496,37 @@ def extrair_capa_de_pdf(arquivo_pdf: str, progress_callback=None) -> dict:
                             dados = dados_capa
                             capa_encontrada = True
 
-            # === Detecta regime tributário automaticamente ===
-            regime_tributario = detectar_regime_tributario(
+            # === 3️⃣ Detecta automaticamente os regimes tributários ===
+            regime_dest = detectar_regime_tributario(
                 dest_doc=dados.get("dest_doc"),
-                emitente_doc=dados.get("emitente_doc")
+                emitente_doc=None
+            )
+            regime_emit = detectar_regime_tributario(
+                dest_doc=dados.get("emitente_doc"),
+                emitente_doc=None
             )
 
+            # === 4️⃣ Define o regime final conforme a combinação ===
+            if regime_dest == "normal" and regime_emit == "simples":
+                regime_final = "normal"
+            elif regime_dest == "simples" and regime_emit == "normal":
+                regime_final = "misto"
+            else:
+                regime_final = regime_dest or regime_emit or "normal"
 
-            # === 3️⃣ Enriquecimento fiscal automático (usa codigos_fiscais.py) ===
+            if DEBUG:
+                print(f"[DEBUG] Regimes detectados → Emitente: {regime_emit}, Destinatário: {regime_dest}, Final: {regime_final}")
+
+            # === 5️⃣ Enriquecimento fiscal automático (usa codigos_fiscais.py) ===
             if itens:
-                itens = enriquecer_itens(itens, uf_destino="BA", regime=regime_tributario)
-                dados["regime_tributario"] = regime_tributario
+                itens = enriquecer_itens(itens, uf_destino="BA", regime=regime_final)
 
+            # Armazena as informações de regime no dicionário de retorno
+            dados["regime_emit"] = regime_emit
+            dados["regime_dest"] = regime_dest
+            dados["regime_final"] = regime_final
 
-            # === 4️⃣ Retorna resultado consolidado ===
+            # === 6️⃣ Retorna resultado consolidado ===
             if capa_encontrada or itens:
                 if progress_callback:
                     status = "✅" if capa_encontrada else "⚠️"
@@ -521,7 +538,7 @@ def extrair_capa_de_pdf(arquivo_pdf: str, progress_callback=None) -> dict:
             print(f"[DEBUG] Erro catastrófico em pdfplumber para {nome_arquivo}: {e}")
         pass  # Fallback para OCR
 
-    # === 5️⃣ Fallback: OCR para PDFs escaneados (sem itens) ===
+    # === 7️⃣ Fallback: OCR para PDFs escaneados (sem itens) ===
     try:
         if progress_callback:
             progress_callback(f"🔄 OCR: {nome_arquivo}")
@@ -538,7 +555,7 @@ def extrair_capa_de_pdf(arquivo_pdf: str, progress_callback=None) -> dict:
         if progress_callback:
             progress_callback(f"❌ Erro OCR/Extração: {e}")
 
-    # === 6️⃣ Retorno vazio padrão ===
+    # === 8️⃣ Retorno vazio padrão ===
     vazio = {k: None for k in [
         "numero_nf", "serie", "emitente_doc", "emitente_nome",
         "dest_doc", "dest_nome", "data_emissao", "valor_total", "valor_total_num"
@@ -614,10 +631,15 @@ def exportar_para_excel_com_itens(df: pd.DataFrame) -> bytes:
                         "emitente_nome": row.get("emitente_nome"),
                         "data_emissao": row.get("data_emissao"),
                         "valor_nf": row.get("valor_total_num"),
+                        "regime_emit": row.get("regime_emit"),
+                        "regime_dest": row.get("regime_dest"),
+                        "regime_final": row.get("regime_final"),
+
                         **item
                     })
         if todas_linhas:
             pd.DataFrame(todas_linhas).to_excel(writer, sheet_name="Itens Detalhados", index=False)
+
 
     output.seek(0)
     return output.getvalue()
