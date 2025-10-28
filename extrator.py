@@ -1,16 +1,17 @@
+from typing import Any, Optional
 import os, io, re, requests, time
 from pathlib import Path
 from datetime import datetime
-from typing import Any, cast
 import numpy as np
 import pdfplumber
 import pandas as pd
 from PIL import Image, ImageEnhance, ImageOps
-import fitz # PyMuPDF
+import fitz  # PyMuPDF
 
 # =============== CONFIG ===============
 DEBUG = False
-CNPJ_CACHE: dict[str, dict] = {}
+CNPJ_CACHE: dict[str, Optional[str]] = {}
+EASY_OCR = None  # Inicializar a variável global para evitar erros
 
 # =============== REGEX ===============
 RE_MOEDA = re.compile(r"R?\$?\s*(\d{1,3}(?:\.\d{3})*,\d{2})")
@@ -28,32 +29,16 @@ RE_CNPJ_PLAIN  = re.compile(r"\b\d{14}\b")
 RE_CPF_MASK    = re.compile(r"\b\d{3}\.\d{3}\.\d{3}-\d{2}\b")
 RE_CPF_PLAIN   = re.compile(r"\b\d{11}\b")
 
-IGNORAR_NOMES_EMIT = {
-    "DANFE","DOCUMENTO","AUXILIAR","NOTA","FISCAL","ELETRÔNICA","ELETRONICA",
-    "DOCUMENTO AUXILIAR DA","NOTA FISCAL","DOCUMENTO AUXILIAR"
-}
-
-HEADER_KEYWORDS = {
-    "NOME","RAZÃO","RAZAO","CNPJ","CPF","DATA","ENDEREÇO","ENDERECO",
-    "INSCRIÇÃO","INSCRICAO","CEP","MUNICÍPIO","MUNICIPIO","BAIRRO",
-    "DISTRITO","FONE","FAX","HORA","UF","NATUREZA DA OPERAÇÃO","PROTOCOLO",
-    "CHAVE DE ACESSO","SEFAZ","SITE","DANFE"
-}
-
-HEADERS = {"User-Agent": "NF-Cover-Extractor/1.0"}
-
-EASY_OCR = None
-
+# =============== UTILS ===============
 def carregar_easy_ocr():
     try:
         import easyocr
         reader = easyocr.Reader(['pt', 'en'], gpu=False)
         return reader
-    except:
+    except ImportError:
         return None
-
-# =============== UTILS ===============
-def somente_digitos(s: str | Any) -> str:
+    
+def somente_digitos(s: Any) -> str:
     s_str = str(s) if s is not None else ""
     return re.sub(r"\D", "", s_str or "")
 
@@ -67,7 +52,7 @@ def fmt_cpf(cpf_digits: str) -> str:
     if len(d) != 11: return cpf_digits
     return f"{d[0:3]}.{d[3:6]}.{d[6:9]}-{d[9:11]}"
 
-def achar_doc_em_linha(s: str) -> str | None:
+def achar_doc_em_linha(s: str) -> Optional[str]:
     m = RE_CNPJ_MASK.search(s) or RE_CPF_MASK.search(s)
     if m: return m.group(0)
     m = RE_CNPJ_PLAIN.search(s)
@@ -76,14 +61,10 @@ def achar_doc_em_linha(s: str) -> str | None:
     if m: return fmt_cpf(m.group(0))
     return None
 
-def moeda_to_float(s: str | None) -> float | None:
+def moeda_to_float(s: Optional[str]) -> Optional[float]:
     if not s: return None
     try: return float(s.replace(".", "").replace(",", "."))
     except: return None
-
-def is_headerish(s: str) -> bool:
-    up = s.upper()
-    return any(k in up for k in HEADER_KEYWORDS)
 
 def pick_last_money_on_same_or_next_lines(linhas, idx, max_ahead=6):
     def pick(line):
@@ -99,16 +80,35 @@ def pick_last_money_on_same_or_next_lines(linhas, idx, max_ahead=6):
         if v: return v
     return None
 
+# Consulta API para enriquecer nome emitente a partir do CNPJ
+def consulta_cnpj_api(cnpj: str) -> Optional[str]:
+    cnpj_digits = somente_digitos(cnpj)
+    if cnpj_digits in CNPJ_CACHE:
+        return CNPJ_CACHE[cnpj_digits]
+    url = f"https://www.receitaws.com.br/v1/cnpj/{cnpj_digits}"
+    try:
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            if isinstance(data, dict) and data.get("status") == "OK":
+                nome_empresarial = data.get("nome")
+                CNPJ_CACHE[cnpj_digits] = nome_empresarial
+                return nome_empresarial
+    except Exception as e:
+        if DEBUG:
+            print(f"[DEBUG] Erro na consulta do CNPJ {cnpj}: {e}")
+    return None
+
 # =============== EXTRAÇÃO DE TEXTO ===============
 def extrair_capa_de_texto(texto: str) -> dict:
-    numero_nf: str | None = None
-    serie: str | None = None
-    emitente_nome: str | None = None
-    emitente_doc: str | None = None
-    dest_nome: str | None = None
-    dest_doc: str | None = None
-    data_emissao: str | None = None
-    valor_total: str | None = None
+    numero_nf: Optional[str] = None
+    serie: Optional[str] = None
+    emitente_doc: Optional[str] = None
+    emitente_nome: Optional[str] = None
+    dest_nome: Optional[str] = None
+    dest_doc: Optional[str] = None
+    data_emissao: Optional[str] = None
+    valor_total: Optional[str] = None
 
     linhas = texto.split("\n")
 
@@ -143,25 +143,27 @@ def extrair_capa_de_texto(texto: str) -> dict:
                     serie = m.group(1)
 
     # -------- EMITENTE --------
-
-    def extrair_emitente(texto: str):
-        # Padrão explícito para CNPJ com borda de palavra para evitar falsos positivos
+    if emitente_doc is None:
         cnpjs = re.findall(r"\b\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}\b", texto)
-        emitente_doc = None
-        emitente_nome = None
         if cnpjs:
-            emitente_doc = cnpjs[0]  # tipicamente o primeiro CNPJ é do emitente
-            # Buscar trecho antes do CNPJ para tentar capturar o nome do emitente
-            idx = texto.find(emitente_doc)
-            trecho_antes = texto[max(0, idx-150):idx].strip()
-            linhas = trecho_antes.split("\n")
-            # considerar as últimas linhas do trecho como nome possível
-            for linha in reversed(linhas):
-                linha_limpa = linha.strip()
-                if linha_limpa and not any(palavra in linha_limpa.upper() for palavra in ["CNPJ", "CPF", "ENDEREÇO", "RAZÃO", "NOTA", "EMITENTE"]):
-                    emitente_nome = linha_limpa
-                    break
-        return emitente_doc, emitente_nome
+            emitente_doc = cnpjs[0]
+            # Proteção contra passar None para find (que requer str)
+            if emitente_doc is not None:
+                idx = texto.find(emitente_doc)
+                if idx != -1:
+                    trecho_antes = texto[max(0, idx-150):idx].strip()
+                    linhas_antes = trecho_antes.split("\n")
+                    for linha in reversed(linhas_antes):
+                        linha_limpa = linha.strip()
+                        if linha_limpa and not any(k in linha_limpa.upper() for k in ["CNPJ", "CPF", "ENDEREÇO", "RAZÃO", "NOTA", "EMITENTE"]):
+                            emitente_nome = linha_limpa
+                            break
+        # Enriquecer nome consultando API se nome não foi obtido no texto
+            # Proteção para garantir que emitente_doc não é None antes de passar para consulta_cnpj_api
+            if emitente_doc is not None and not emitente_nome:
+                nome_api = consulta_cnpj_api(emitente_doc)
+                if nome_api:
+                    emitente_nome = nome_api
 
 
     # -------- DESTINATÁRIO --------
@@ -233,10 +235,7 @@ def extrair_texto_ocr(arquivo_pdf, progress_callback=None):
         pix = page.get_pixmap(dpi=300)
         img = Image.open(io.BytesIO(pix.tobytes()))
         result = EASY_OCR.readtext(np.array(img), detail=0, paragraph=True)
-        # Se 'result' for uma lista de strings, mantenha. 
-        # Se for uma lista de listas/dicionários, filtre apenas os textos.
         if isinstance(result, list):
-            # EasyOCR retorna lista de tuplas: [ [bbox, texto, conf], ... ]
             textos = []
             for item in result:
                 if isinstance(item, str):
@@ -292,6 +291,7 @@ def extrair_capa_de_pdf(arquivo_pdf: str, progress_callback=None) -> dict:
     ]}
     return {"arquivo": nome_arquivo, **vazio}
 
+
 def processar_pdfs(arquivos_pdf: list, progress_callback=None) -> pd.DataFrame:
     regs = []
     for i, pdf_path in enumerate(arquivos_pdf, 1):
@@ -305,6 +305,7 @@ def processar_pdfs(arquivos_pdf: list, progress_callback=None) -> pd.DataFrame:
     except:
         pass
     return df
+
 
 def exportar_para_excel(df: pd.DataFrame) -> bytes:
     output = io.BytesIO()
