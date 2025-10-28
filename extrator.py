@@ -463,19 +463,33 @@ def processar_pdfs(arquivos_pdf: list, progress_callback=None) -> pd.DataFrame:
             progress_callback(f"[{i}/{len(arquivos_pdf)}] {Path(pdf_path).name}")
         regs.append(extrair_capa_de_pdf(pdf_path, progress_callback))
     
-    # Criamos um DataFrame temporário para os dados da capa, e mantemos a lista de itens
-    df_base = pd.DataFrame(regs)
+    df = pd.DataFrame(regs).drop_duplicates(subset=["arquivo"], keep="first")
     
-    # Normalizamos o DataFrame (drop_duplicates, sorting, etc.)
-    df_processado = df_base.drop_duplicates(subset=["arquivo"], keep="first")
-    try:
-        df_processado["_ordem"] = pd.to_datetime(df_processado["data_emissao"], format="%d/%m/%Y", errors="coerce")
-        df_processado = df_processado.sort_values(by=["_ordem","arquivo"], na_position="last").drop(columns=["_ordem"])
-    except:
-        pass
+    # =================================================================
+    # CORREÇÃO CRÍTICA: Limpeza e Conversão de Tipos
+    # Garante que as colunas essenciais para o Pandas e IA estão corretas
+    # =================================================================
+    
+    # 1. Colunas de nome/texto: força string para evitar o erro .str
+    for col in ["emitente_nome", "dest_nome"]:
+        if col in df.columns:
+            # Preenche NaNs com string vazia e depois converte tudo para string
+            df[col] = df[col].fillna('').astype(str)
+            
+    # 2. Colunas numéricas: força float
+    if "valor_total_num" in df.columns:
+        df["valor_total_num"] = pd.to_numeric(df["valor_total_num"], errors="coerce")
         
-    # Retornamos o DataFrame com a nova coluna 'itens_nf' (uma lista de dicts)
-    return df_processado
+    # 3. Colunas de data
+    if "data_emissao" in df.columns:
+        # Tenta a conversão de data (necessário para ordenar)
+        df["_ordem"] = pd.to_datetime(df["data_emissao"], format="%d/%m/%Y", errors="coerce")
+        df = df.sort_values(by=["_ordem", "numero_nf"], ascending=[True, True])
+        df = df.drop(columns=["_ordem"])
+        
+    # =================================================================
+    
+    return df
 
 
 def exportar_para_excel(df: pd.DataFrame) -> bytes:
