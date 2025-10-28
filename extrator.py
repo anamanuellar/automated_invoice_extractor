@@ -388,6 +388,28 @@ def extrair_itens_da_tabela(pdf_page) -> List[Dict[str, Any]]:
             print(f"[DEBUG] Erro na extração híbrida de itens: {e}")
         return []
 
+# ==================== CLASSIFICAÇÃO CONTÁBIL AUTOMÁTICA ====================
+
+CLASSIFICACAO_CONTABIL = {
+    "1": "Compra de mercadorias para revenda",
+    "2": "Devolução de compras / ajustes de estoque",
+    "3": "Aquisição de ativo imobilizado",
+    "5": "Prestação de serviços tomados",
+    "6": "Venda de mercadorias ou serviços (receita)",
+    "7": "Transferências internas",
+    "9": "Outras operações (sem impacto contábil direto)",
+}
+
+def classificar_contabilmente(cfop: str) -> str:
+    """Retorna a classificação contábil sugerida com base no CFOP."""
+    if not cfop:
+        return "Não identificado"
+    cfop = str(cfop).strip()
+    if len(cfop) >= 1 and cfop[0] in CLASSIFICACAO_CONTABIL:
+        return CLASSIFICACAO_CONTABIL[cfop[0]]
+    return "Não identificado"
+
+
 def enriquecer_itens(itens, uf_destino="BA", regime="simples"):
     """Usa a biblioteca de códigos fiscais para enriquecer os dados dos itens"""
     itens_enriquecidos = []
@@ -396,20 +418,30 @@ def enriquecer_itens(itens, uf_destino="BA", regime="simples"):
         ncm = str(item.get("ncm", "")).strip()
         csosn = str(item.get("csosn", item.get("ocst", ""))).strip()
 
+        analise = None
         if cfop or ncm:
             analise = analisar_nf(cfop, ncm, csosn, uf_destino, regime)
-            item.update({
-                "cfop_desc": analise.get("cfop_info", {}).get("descricao"),
-                "ncm_desc": analise.get("ncm_info", {}).get("descricao"),
-                "icms_aplica": analise.get("cfop_info", {}).get("icms_aplica"),
-                "ipi_aplica": analise.get("cfop_info", {}).get("ipi_aplica"),
-                "aliquota_icms": analise.get("aliquota_icms"),
-                "aliquota_ipi": analise.get("aliquota_ipi"),
-                "aliquota_pis": analise.get("aliquota_pis"),
-                "aliquota_cofins": analise.get("aliquota_cofins"),
-            })
+            # ✅ Garante que analise seja um dicionário válido
+            if not isinstance(analise, dict):
+                analise = {}
+
+        item.update({
+            "cfop_desc": analise.get("cfop_info", {}).get("descricao") if analise else None,
+            "ncm_desc": analise.get("ncm_info", {}).get("descricao") if analise else None,
+            "icms_aplica": analise.get("cfop_info", {}).get("icms_aplica") if analise else None,
+            "ipi_aplica": analise.get("cfop_info", {}).get("ipi_aplica") if analise else None,
+            "aliquota_icms": analise.get("aliquota_icms") if analise else None,
+            "aliquota_ipi": analise.get("aliquota_ipi") if analise else None,
+            "aliquota_pis": analise.get("aliquota_pis") if analise else None,
+            "aliquota_cofins": analise.get("aliquota_cofins") if analise else None,
+            # 🧾 Classificação contábil automática
+            "classificacao_contabil": classificar_contabilmente(cfop),
+        })
+
         itens_enriquecidos.append(item)
+
     return itens_enriquecidos
+
 
 # ==================== FUNÇÕES DE EXTRAÇÃO (ADAPTADAS) ====================
 
