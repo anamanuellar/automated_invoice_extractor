@@ -364,51 +364,71 @@ def extrair_texto_ocr(arquivo_pdf, progress_callback=None):
     return texto_total
 
 # FUNÇÃO PRINCIPAL ADAPTADA para retornar ITENS
+
+# No arquivo extrator.py, substitua a função extrair_capa_de_pdf pela seguinte:
+
 def extrair_capa_de_pdf(arquivo_pdf: str, progress_callback=None) -> dict:
     nome_arquivo = Path(arquivo_pdf).name
-    itens: List[Dict[str, Any]] = []
+    # Inicializa a lista de itens fora do try/except
+    itens: List[Dict[str, Any]] = [] 
     dados = {}
     
-    # 1. Tentativa com pdfplumber (melhor para tabelas)
+    # 1. Tentativa com pdfplumber (melhor para tabelas e texto nativo)
     try:
         with pdfplumber.open(arquivo_pdf) as pdf:
-            # Assumimos que a capa e itens estão na primeira página
-            if pdf.pages:
-                page = pdf.pages[0]
+            capa_encontrada = False
+            
+            # Itera sobre todas as páginas para garantir que pegamos todos os itens
+            for page in pdf.pages:
                 
-                # Extrai itens da tabela (Novo!)
-                itens = extrair_itens_da_tabela(page)
+                # Extrai itens da tabela em cada página (Função extrair_itens_da_tabela deve estar atualizada e aprimorada!)
+                try:
+                    itens.extend(extrair_itens_da_tabela(page))
+                except Exception as e:
+                    if DEBUG:
+                        print(f"[DEBUG] Falha ao extrair itens da Pág {page.page_number} de {nome_arquivo}: {e}")
                 
-                # Extrai texto da capa
-                txt = page.extract_text() or ""
-                if txt and len(txt.strip()) > 100:
-                    dados = extrair_capa_de_texto(txt)
+                # Tenta extrair a capa (geralmente na Pág 1)
+                if not capa_encontrada:
+                    txt = page.extract_text() or ""
+                    if txt and len(txt.strip()) > 100:
+                        dados_capa = extrair_capa_de_texto(txt)
+                        # Só consideramos a capa encontrada se tiver pelo menos o número da NF
+                        if dados_capa.get("numero_nf"): 
+                            dados = dados_capa
+                            capa_encontrada = True
+
+            # Retorna o resultado do pdfplumber se algo útil foi encontrado
+            if capa_encontrada or itens:
+                if progress_callback:
+                    status = "✅" if capa_encontrada else "⚠️"
+                    progress_callback(f"{status} pdfplumber: {nome_arquivo} ({len(itens)} itens encontrados)")
+                # A chave "itens_nf" é sempre incluída
+                return {"arquivo": nome_arquivo, **dados, "itens_nf": itens}
                 
-                if any([dados.get("numero_nf"), dados.get("emitente_doc"), dados.get("valor_total")]):
-                    if progress_callback:
-                        progress_callback(f"✅ pdfplumber: {nome_arquivo}")
-                    # Inclui itens no resultado
-                    return {"arquivo": nome_arquivo, **dados, "itens_nf": itens}
     except Exception as e:
         if DEBUG:
-            print(f"[DEBUG] Erro em pdfplumber para {nome_arquivo}: {e}")
-        pass # Tenta OCR se pdfplumber falhar
+            print(f"[DEBUG] Erro catastrófico em pdfplumber para {nome_arquivo}: {e}")
+        pass # Segue para OCR
 
-    # 2. Tentativa com OCR (não extrai tabelas bem, mas extrai a capa)
+    # 2. Tentativa com OCR (para PDFs escaneados - Não extrai itens estruturados)
     try:
         if progress_callback:
             progress_callback(f"🔄 OCR: {nome_arquivo}")
+        
         texto_ocr = extrair_texto_ocr(arquivo_pdf, progress_callback)
         if texto_ocr and len(texto_ocr.strip()) > 100:
             dados = extrair_capa_de_texto(texto_ocr)
+            
             if any([dados.get("numero_nf"), dados.get("emitente_doc"), dados.get("valor_total")]):
                 if progress_callback:
                     progress_callback(f"✅ OCR: {nome_arquivo}")
-                # OCR não extrai itens estruturados, então retorna lista vazia
+                # Quando usa OCR, assumimos que itens não foram extraídos (retorna lista vazia)
                 return {"arquivo": nome_arquivo, **dados, "itens_nf": []}
+                
     except Exception as e:
         if progress_callback:
-            progress_callback(f"❌ {e}")
+            progress_callback(f"❌ Erro OCR/Extração: {e}")
 
     # 3. Retorno vazio
     vazio = {k: None for k in [
@@ -417,7 +437,6 @@ def extrair_capa_de_pdf(arquivo_pdf: str, progress_callback=None) -> dict:
     ]}
     # Sempre inclui a chave 'itens_nf'
     return {"arquivo": nome_arquivo, **vazio, "itens_nf": []}
-
 
 # =============== FUNÇÕES DE PROCESSAMENTO (ADAPTADAS) ===============
 
