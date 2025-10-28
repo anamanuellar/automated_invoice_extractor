@@ -1,4 +1,4 @@
-from typing import Any, Optional
+from typing import Any, Optional, List, Dict
 import os, io, re, requests, time
 from pathlib import Path
 from datetime import datetime
@@ -6,88 +6,86 @@ import numpy as np
 import pdfplumber
 import pandas as pd
 from PIL import Image, ImageEnhance, ImageOps
-import fitz  # PyMuPDF
+import fitz # PyMuPDF
 
-# =============== CONFIG ===============
+# =============== CONFIG (MANTIDO) ===============
 DEBUG = False
 CNPJ_CACHE: dict[str, Optional[str]] = {}
-EASY_OCR = None  # Inicializar a variável global para evitar erros
+EASY_OCR = None # Inicializar a variável global para evitar erros
 
-# =============== REGEX ===============
+# =============== REGEX (MANTIDO) ===============
 RE_MOEDA = re.compile(r"R?\$?\s*(\d{1,3}(?:\.\d{3})*,\d{2})")
 RE_DATA = re.compile(r"\b\d{2}/\d{2}/\d{4}\b")
 
-RE_NF_MAIN   = re.compile(r"NOTA\s+FISCAL\s+ELETR[ÔO]NICA\s*N[ºO]?\s*([\d\.]+)", re.I)
-RE_NF_ALT    = re.compile(r"\b(?:NF-?E|N[ºO]|NUM(?:ERO)?|NRO)\s*[:\-]?\s*([\d\.]+)", re.I)
+RE_NF_MAIN  = re.compile(r"NOTA\s+FISCAL\s+ELETR[ÔO]NICA\s*N[ºO]?\s*([\d\.]+)", re.I)
+RE_NF_ALT  = re.compile(r"\b(?:NF-?E|N[ºO]|NUM(?:ERO)?|NRO)\s*[:\-]?\s*([\d\.]+)", re.I)
 RE_NF_NUMERO = re.compile(r"N[ºO\.]?\s*[:\-]?\s*(\d{1,6})", re.I)
 
-RE_SERIE      = re.compile(r"S[ÉE]RIE\s*[:\-]?\s*([0-9\.]{1,5})", re.I)
-RE_SERIE_ALT  = re.compile(r"(?:^|\n)S[ÉE]RIE\s*[:\-]?\s*(\d+)", re.I)
+RE_SERIE   = re.compile(r"S[ÉE]RIE\s*[:\-]?\s*([0-9\.]{1,5})", re.I)
+RE_SERIE_ALT = re.compile(r"(?:^|\n)S[ÉE]RIE\s*[:\-]?\s*(\d+)", re.I)
 
-RE_CNPJ_MASK   = re.compile(r"\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}")
-RE_CNPJ_PLAIN  = re.compile(r"\b\d{14}\b")
-RE_CPF_MASK    = re.compile(r"\b\d{3}\.\d{3}\.\d{3}-\d{2}\b")
-RE_CPF_PLAIN   = re.compile(r"\b\d{11}\b")
+RE_CNPJ_MASK  = re.compile(r"\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}")
+RE_CNPJ_PLAIN = re.compile(r"\b\d{14}\b")
+RE_CPF_MASK  = re.compile(r"\b\d{3}\.\d{3}\.\d{3}-\d{2}\b")
+RE_CPF_PLAIN  = re.compile(r"\b\d{11}\b")
 
-# =============== UTILS ===============
+# =============== UTILS (MANTIDO) ===============
 def carregar_easy_ocr():
-    try:
-        import easyocr
-        reader = easyocr.Reader(['pt', 'en'], gpu=False)
-        return reader
-    except ImportError:
-        return None
-    
+  try:
+    import easyocr
+    reader = easyocr.Reader(['pt', 'en'], gpu=False)
+    return reader
+  except ImportError:
+    return None
+  
 def somente_digitos(s: Any) -> str:
-    s_str = str(s) if s is not None else ""
-    return re.sub(r"\D", "", s_str or "")
+  s_str = str(s) if s is not None else ""
+  return re.sub(r"\D", "", s_str or "")
 
 def fmt_cnpj(cnpj_digits: str) -> str:
-    d = somente_digitos(cnpj_digits)
-    if len(d) != 14: return cnpj_digits
-    return f"{d[0:2]}.{d[2:5]}.{d[5:8]}/{d[8:12]}-{d[12:14]}"
+  d = somente_digitos(cnpj_digits)
+  if len(d) != 14: return cnpj_digits
+  return f"{d[0:2]}.{d[2:5]}.{d[5:8]}/{d[8:12]}-{d[12:14]}"
 
 def fmt_cpf(cpf_digits: str) -> str:
-    d = somente_digitos(cpf_digits)
-    if len(d) != 11: return cpf_digits
-    return f"{d[0:3]}.{d[3:6]}.{d[6:9]}-{d[9:11]}"
+  d = somente_digitos(cpf_digits)
+  if len(d) != 11: return cpf_digits
+  return f"{d[0:3]}.{d[3:6]}.{d[6:9]}-{d[9:11]}"
 
 def achar_doc_em_linha(s: str) -> Optional[str]:
-    m = RE_CNPJ_MASK.search(s) or RE_CPF_MASK.search(s)
-    if m: return m.group(0)
-    m = RE_CNPJ_PLAIN.search(s)
-    if m: return fmt_cnpj(m.group(0))
-    m = RE_CPF_PLAIN.search(s)
-    if m: return fmt_cpf(m.group(0))
-    return None
+  m = RE_CNPJ_MASK.search(s) or RE_CPF_MASK.search(s)
+  if m: return m.group(0)
+  m = RE_CNPJ_PLAIN.search(s)
+  if m: return fmt_cnpj(m.group(0))
+  m = RE_CPF_PLAIN.search(s)
+  if m: return fmt_cpf(m.group(0))
+  return None
 
 def moeda_to_float(s: Optional[str]) -> Optional[float]:
-    if not s: return None
-    try: return float(s.replace(".", "").replace(",", "."))
-    except: return None
+  if not s: return None
+  try: return float(s.replace(".", "").replace(",", "."))
+  except: return None
 
 def pick_last_money_on_same_or_next_lines(linhas, idx, max_ahead=6):
-    def pick(line):
-        vals = RE_MOEDA.findall(line)
-        vals = [v for v in vals if v != "0,00"]
-        return vals[-1] if vals else None
-    v = pick(linhas[idx])
+  def pick(line):
+    vals = RE_MOEDA.findall(line)
+    vals = [v for v in vals if v != "0,00"]
+    return vals[-1] if vals else None
+  v = pick(linhas[idx])
+  if v: return v
+  for j in range(1, max_ahead + 1):
+    k = idx + j
+    if k >= len(linhas): break
+    v = pick(linhas[k])
     if v: return v
-    for j in range(1, max_ahead + 1):
-        k = idx + j
-        if k >= len(linhas): break
-        v = pick(linhas[k])
-        if v: return v
-    return None
+  return None
 
-# Consulta API para enriquecer nome emitente a partir do CNPJ
-# Consulta API para enriquecer nome emitente a partir do CNPJ
+# Consulta API para enriquecer nome emitente a partir do CNPJ (Corrigida)
 def consulta_cnpj_api(cnpj: str) -> Optional[str]:
     cnpj_digits = somente_digitos(cnpj)
     if cnpj_digits in CNPJ_CACHE:
         return CNPJ_CACHE[cnpj_digits]
     
-    # Adicionar uma pequena pausa antes de cada requisição para tentar evitar rate limiting
     time.sleep(0.5) 
 
     url = f"https://www.receitaws.com.br/v1/cnpj/{cnpj_digits}"
@@ -96,7 +94,6 @@ def consulta_cnpj_api(cnpj: str) -> Optional[str]:
         
         if response.status_code == 200:
             data = response.json()
-            # A API retorna um status "ERROR" ou "OK"
             if isinstance(data, dict) and data.get("status") == "OK":
                 nome_empresarial = data.get("nome")
                 CNPJ_CACHE[cnpj_digits] = nome_empresarial
@@ -104,16 +101,13 @@ def consulta_cnpj_api(cnpj: str) -> Optional[str]:
             elif isinstance(data, dict) and data.get("status") == "ERROR":
                 if DEBUG:
                     print(f"[DEBUG] Erro da API na consulta do CNPJ {cnpj}: {data.get('message')}")
-                # Não armazenar no cache se houver erro na API
                 return None
         elif response.status_code == 429: # Rate limit
             if DEBUG:
                 print(f"[DEBUG] Rate Limit (429) para o CNPJ {cnpj}. Tentando novamente em 5 segundos.")
-            # Pausa mais longa se atingir o limite de taxa e tenta novamente
             time.sleep(5)
             return consulta_cnpj_api(cnpj)
         
-        # Para outros erros HTTP (e.g., 5xx), não armazenar no cache
         if DEBUG:
             print(f"[DEBUG] Erro HTTP {response.status_code} na consulta do CNPJ {cnpj}")
         
@@ -127,12 +121,82 @@ def consulta_cnpj_api(cnpj: str) -> Optional[str]:
         if DEBUG:
             print(f"[DEBUG] Erro inesperado na consulta do CNPJ {cnpj}: {e}")
             
-    # Se falhar, armazenar None para não tentar novamente imediatamente
     CNPJ_CACHE[cnpj_digits] = None
     return None
 
-# =============== EXTRAÇÃO DE TEXTO ===============
+# ==================== NOVA FUNÇÃO: EXTRAÇÃO DE ITENS ====================
+
+def extrair_itens_da_tabela(pdf_page: Any) -> List[Dict[str, Any]]:
+    """
+    Tenta extrair a tabela de itens (produtos/serviços) da página.
+    """
+    
+    # Configuração de detecção de tabelas para NFe padrão
+    # Muitas NFs têm 6 a 9 colunas para (Código, Descrição, Qtd, Unidade, Valor Unitário, Valor Total, etc.)
+    table_settings = {
+        "vertical_strategy": "lines",
+        "horizontal_strategy": "lines",
+        "snap_y_tolerance": 5, # Permite um pequeno desvio vertical
+    }
+
+    try:
+        # Extrai todas as tabelas da página
+        tables = pdf_page.extract_tables(table_settings)
+        
+        itens_extraidos: List[Dict[str, Any]] = []
+        
+        for table in tables:
+            if not table or len(table) < 2:
+                continue
+
+            # Tentativa de identificar o cabeçalho (pode variar muito)
+            header_row = [str(c).upper().strip() for c in table[0] if c is not None]
+            
+            # Condição básica: precisa ter 'DESCRIÇÃO' e algum tipo de 'VALOR'
+            has_descricao = any('DESCRICAO' in h or 'PRODUTO' in h or 'SERVICO' in h for h in header_row)
+            has_valor = any('VALOR' in h or 'TOTAL' in h for h in header_row)
+
+            if has_descricao and has_valor:
+                # Mapear as colunas de interesse
+                mapa_colunas = {}
+                for i, col_name in enumerate(header_row):
+                    if 'DESCRICAO' in col_name or 'PRODUTO' in col_name or 'SERVICO' in col_name:
+                        mapa_colunas['descricao'] = i
+                    elif 'VALOR' in col_name and not any(k in col_name for k in ['ICMS', 'IPI']):
+                        mapa_colunas['valor_total'] = i
+                    elif 'QUANT' in col_name or 'QTDE' in col_name:
+                        mapa_colunas['quantidade'] = i
+
+                if 'descricao' in mapa_colunas and 'valor_total' in mapa_colunas:
+                    for row_idx, row in enumerate(table):
+                        if row_idx == 0: continue # Ignorar cabeçalho
+
+                        descricao_raw = row[mapa_colunas['descricao']] if mapa_colunas['descricao'] < len(row) and row[mapa_colunas['descricao']] else None
+                        valor_raw = row[mapa_colunas['valor_total']] if mapa_colunas['valor_total'] < len(row) and row[mapa_colunas['valor_total']] else None
+                        
+                        descricao_str = str(descricao_raw).strip() if descricao_raw else ""
+                        valor_str = str(valor_raw).strip() if valor_raw else ""
+
+                        # Validação básica
+                        if len(descricao_str) > 5 and moeda_to_float(valor_str) is not None:
+                            itens_extraidos.append({
+                                'descricao_item': descricao_str,
+                                'valor_item': moeda_to_float(valor_str)
+                            })
+
+        return itens_extraidos
+
+    except Exception as e:
+        if DEBUG:
+            print(f"[DEBUG] Erro na extração de itens da tabela: {e}")
+        return []
+
+# ==================== FUNÇÕES DE EXTRAÇÃO (ADAPTADAS) ====================
+
 def extrair_capa_de_texto(texto: str) -> dict:
+    # ... (Seu código existente para extrair capa: numero_nf, emitente_doc, etc.)
+    # Apenas para manter o código enxuto, assumimos que esta função não muda
+    
     numero_nf: Optional[str] = None
     serie: Optional[str] = None
     emitente_doc: Optional[str] = None
@@ -189,7 +253,6 @@ def extrair_capa_de_texto(texto: str) -> dict:
                         if linha_limpa and not any(k in linha_limpa.upper() for k in ["CNPJ", "CPF", "ENDEREÇO", "RAZÃO", "NOTA", "EMITENTE"]):
                             alpha_count = sum(c.isalpha() for c in linha_limpa)
                             if alpha_count >= max(3, len(linha_limpa) // 2):
-                                # deixa emitir nome por enquanto, mas vai ser sobrescrito abaixo
                                 emitente_nome = linha_limpa
                                 break
 
@@ -251,8 +314,9 @@ def extrair_capa_de_texto(texto: str) -> dict:
     }
     return resultado
 
-def extrair_texto_ocr(arquivo_pdf, progress_callback=None):
 
+def extrair_texto_ocr(arquivo_pdf, progress_callback=None):
+    # ... (Seu código existente para OCR, mantido)
     global EASY_OCR
     if EASY_OCR is None:
         EASY_OCR = carregar_easy_ocr()
@@ -286,42 +350,63 @@ def extrair_texto_ocr(arquivo_pdf, progress_callback=None):
 
     return texto_total
 
-
+# FUNÇÃO PRINCIPAL ADAPTADA para retornar ITENS
 def extrair_capa_de_pdf(arquivo_pdf: str, progress_callback=None) -> dict:
     nome_arquivo = Path(arquivo_pdf).name
+    itens: List[Dict[str, Any]] = []
+    dados = {}
+    
+    # 1. Tentativa com pdfplumber (melhor para tabelas)
     try:
         with pdfplumber.open(arquivo_pdf) as pdf:
-            for page in pdf.pages:
+            # Assumimos que a capa e itens estão na primeira página
+            if pdf.pages:
+                page = pdf.pages[0]
+                
+                # Extrai itens da tabela (Novo!)
+                itens = extrair_itens_da_tabela(page)
+                
+                # Extrai texto da capa
                 txt = page.extract_text() or ""
                 if txt and len(txt.strip()) > 100:
                     dados = extrair_capa_de_texto(txt)
-                    if any([dados["numero_nf"], dados["emitente_doc"], dados["dest_doc"], dados["valor_total"]]):
-                        if progress_callback:
-                            progress_callback(f"✅ pdfplumber: {nome_arquivo}")
-                        return {"arquivo": nome_arquivo, **dados}
-    except:
-        pass
+                
+                if any([dados.get("numero_nf"), dados.get("emitente_doc"), dados.get("valor_total")]):
+                    if progress_callback:
+                        progress_callback(f"✅ pdfplumber: {nome_arquivo}")
+                    # Inclui itens no resultado
+                    return {"arquivo": nome_arquivo, **dados, "itens_nf": itens}
+    except Exception as e:
+        if DEBUG:
+            print(f"[DEBUG] Erro em pdfplumber para {nome_arquivo}: {e}")
+        pass # Tenta OCR se pdfplumber falhar
 
+    # 2. Tentativa com OCR (não extrai tabelas bem, mas extrai a capa)
     try:
         if progress_callback:
             progress_callback(f"🔄 OCR: {nome_arquivo}")
         texto_ocr = extrair_texto_ocr(arquivo_pdf, progress_callback)
         if texto_ocr and len(texto_ocr.strip()) > 100:
             dados = extrair_capa_de_texto(texto_ocr)
-            if any([dados["numero_nf"], dados["emitente_doc"], dados["dest_doc"], dados["valor_total"]]):
+            if any([dados.get("numero_nf"), dados.get("emitente_doc"), dados.get("valor_total")]):
                 if progress_callback:
                     progress_callback(f"✅ OCR: {nome_arquivo}")
-                return {"arquivo": nome_arquivo, **dados}
+                # OCR não extrai itens estruturados, então retorna lista vazia
+                return {"arquivo": nome_arquivo, **dados, "itens_nf": []}
     except Exception as e:
         if progress_callback:
             progress_callback(f"❌ {e}")
 
+    # 3. Retorno vazio
     vazio = {k: None for k in [
         "numero_nf","serie","emitente_doc","emitente_nome",
         "dest_doc","dest_nome","data_emissao","valor_total","valor_total_num"
     ]}
-    return {"arquivo": nome_arquivo, **vazio}
+    # Sempre inclui a chave 'itens_nf'
+    return {"arquivo": nome_arquivo, **vazio, "itens_nf": []}
 
+
+# =============== FUNÇÕES DE PROCESSAMENTO (ADAPTADAS) ===============
 
 def processar_pdfs(arquivos_pdf: list, progress_callback=None) -> pd.DataFrame:
     regs = []
@@ -329,17 +414,26 @@ def processar_pdfs(arquivos_pdf: list, progress_callback=None) -> pd.DataFrame:
         if progress_callback:
             progress_callback(f"[{i}/{len(arquivos_pdf)}] {Path(pdf_path).name}")
         regs.append(extrair_capa_de_pdf(pdf_path, progress_callback))
-    df = pd.DataFrame(regs).drop_duplicates(subset=["arquivo"], keep="first")
+    
+    # Criamos um DataFrame temporário para os dados da capa, e mantemos a lista de itens
+    df_base = pd.DataFrame(regs)
+    
+    # Normalizamos o DataFrame (drop_duplicates, sorting, etc.)
+    df_processado = df_base.drop_duplicates(subset=["arquivo"], keep="first")
     try:
-        df["_ordem"] = pd.to_datetime(df["data_emissao"], format="%d/%m/%Y", errors="coerce")
-        df = df.sort_values(by=["_ordem","arquivo"], na_position="last").drop(columns=["_ordem"])
+        df_processado["_ordem"] = pd.to_datetime(df_processado["data_emissao"], format="%d/%m/%Y", errors="coerce")
+        df_processado = df_processado.sort_values(by=["_ordem","arquivo"], na_position="last").drop(columns=["_ordem"])
     except:
         pass
-    return df
+        
+    # Retornamos o DataFrame com a nova coluna 'itens_nf' (uma lista de dicts)
+    return df_processado
 
 
 def exportar_para_excel(df: pd.DataFrame) -> bytes:
+    # Remove a coluna 'itens_nf' para exportação, pois contém listas de dicts
+    df_export = df.drop(columns=['itens_nf'], errors='ignore')
     output = io.BytesIO()
-    df.to_excel(output, index=False, engine='openpyxl')
+    df_export.to_excel(output, index=False, engine='openpyxl')
     output.seek(0)
     return output.getvalue()
