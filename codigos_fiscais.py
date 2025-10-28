@@ -18,6 +18,8 @@ from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass
 from enum import Enum
 
+DEBUG = True
+
 
 # =============== ENUMS E CLASSES ===============
 
@@ -821,7 +823,8 @@ def analisar_nf(
     regime: str = "simples"
 ) -> Dict[str, Any]:
     """
-    Analisa uma operação fiscal e retorna informações consolidadas
+    Analisa uma operação fiscal e retorna informações consolidadas.
+    Garante retorno seguro (sempre um dicionário, nunca None).
     """
 
     resultado = {
@@ -836,67 +839,73 @@ def analisar_nf(
         "avisos": [],
     }
 
-    # CFOP
-    cfop_info = CFOP.buscar(cfop)
-    if cfop_info:
-        resultado["cfop_info"] = {
-            "codigo": cfop_info.codigo,
-            "descricao": cfop_info.descricao,
-            "icms_aplica": cfop_info.icms_aplica,
-            "ipi_aplica": cfop_info.ipi_aplica,
-        }
-    else:
-        resultado["avisos"].append(f"CFOP {cfop} não encontrado")
-
-    # NCM
-    ncm_info = NCM.buscar(ncm)
-    if ncm_info:
-        resultado["ncm_info"] = {
-            "codigo": NCM.formatar(ncm),
-            "descricao": ncm_info.descricao,
-            "aliquota_icms": ncm_info.aliquota_icms_padrao,
-            "aliquota_ipi": ncm_info.aliquota_ipi,
-        }
-        resultado["aliquota_icms"] = ncm_info.aliquota_icms_padrao
-        resultado["aliquota_ipi"] = ncm_info.aliquota_ipi
-    else:
-        resultado["avisos"].append(f"NCM {ncm} não encontrado na base")
-
-    # Regime tributário
-    if regime == "simples":
-        csosn_info = CSOSN.buscar(csosn_ou_cst)
-        if csosn_info:
-            resultado["tributo_info"] = {
-                "codigo": csosn_info.codigo,
-                "descricao": csosn_info.descricao,
-                "aplica_icms": csosn_info.aplica_icms,
-                "credito_icms": csosn_info.credito_icms,
+    try:
+        # CFOP
+        cfop_info = CFOP.buscar(cfop)
+        if cfop_info:
+            resultado["cfop_info"] = {
+                "codigo": cfop_info.codigo,
+                "descricao": cfop_info.descricao,
+                "icms_aplica": cfop_info.icms_aplica,
+                "ipi_aplica": cfop_info.ipi_aplica,
             }
-            if not csosn_info.aplica_icms:
-                resultado["aliquota_icms"] = 0.0
-    else:
-        ocst_info = OCST.buscar(csosn_ou_cst)
-        if ocst_info:
-            resultado["tributo_info"] = {
-                "codigo": ocst_info.codigo,
-                "descricao": ocst_info.descricao,
-                "aplica_icms": ocst_info.aplica_icms,
-                "credito_icms": ocst_info.credito_icms,
+        else:
+            resultado["avisos"].append(f"CFOP {cfop} não encontrado")
+
+        # NCM
+        ncm_info = NCM.buscar(ncm)
+        if ncm_info:
+            resultado["ncm_info"] = {
+                "codigo": NCM.formatar(ncm),
+                "descricao": ncm_info.descricao,
+                "aliquota_icms": ncm_info.aliquota_icms_padrao,
+                "aliquota_ipi": ncm_info.aliquota_ipi,
             }
-            if not ocst_info.aplica_icms:
-                resultado["aliquota_icms"] = 0.0
+            resultado["aliquota_icms"] = ncm_info.aliquota_icms_padrao
+            resultado["aliquota_ipi"] = ncm_info.aliquota_ipi
+        else:
+            resultado["avisos"].append(f"NCM {ncm} não encontrado na base")
 
-    # ICMS por Estado
-    aliq_estado = ICMS.buscar_estado(uf_destino)
-    if aliq_estado and resultado["aliquota_icms"] > 0:
-        resultado["aliquota_icms"] = min(resultado["aliquota_icms"], aliq_estado)
+        # Regime tributário
+        if regime == "simples":
+            csosn_info = CSOSN.buscar(csosn_ou_cst)
+            if csosn_info:
+                resultado["tributo_info"] = {
+                    "codigo": csosn_info.codigo,
+                    "descricao": csosn_info.descricao,
+                    "aplica_icms": csosn_info.aplica_icms,
+                    "credito_icms": csosn_info.credito_icms,
+                }
+                if not csosn_info.aplica_icms:
+                    resultado["aliquota_icms"] = 0.0
+        else:
+            ocst_info = OCST.buscar(csosn_ou_cst)
+            if ocst_info:
+                resultado["tributo_info"] = {
+                    "codigo": ocst_info.codigo,
+                    "descricao": ocst_info.descricao,
+                    "aplica_icms": ocst_info.aplica_icms,
+                    "credito_icms": ocst_info.credito_icms,
+                }
+                if not ocst_info.aplica_icms:
+                    resultado["aliquota_icms"] = 0.0
 
-    # PIS/COFINS
-    piscofins = PISCOFINS.get_aliquota_pis_cofins(regime)
-    resultado["aliquota_pis"] = piscofins.get("pis", 0.0)
-    resultado["aliquota_cofins"] = piscofins.get("cofins", 0.0)
+        # ICMS por Estado
+        aliq_estado = ICMS.buscar_estado(uf_destino)
+        if aliq_estado and resultado["aliquota_icms"] > 0:
+            resultado["aliquota_icms"] = min(resultado["aliquota_icms"], aliq_estado)
 
-    return resultado
+        # PIS/COFINS
+        piscofins = PISCOFINS.get_aliquota_pis_cofins(regime)
+        resultado["aliquota_pis"] = piscofins.get("pis", 0.0)
+        resultado["aliquota_cofins"] = piscofins.get("cofins", 0.0)
+
+        return resultado
+
+    except Exception as e:
+        if DEBUG:
+            print(f"[DEBUG] Falha em analisar_nf (CFOP={cfop}, NCM={ncm}): {e}")
+        return {"status": "ERRO", "avisos": [str(e)]}
 
 
 # =============== EXEMPLOS DE USO ===============
