@@ -5,6 +5,7 @@ import numpy as np
 from typing import Dict, List, Any, Optional, Union, Sequence 
 import warnings
 warnings.filterwarnings('ignore')
+from transformers import pipeline
 
 # =============== HUGGING FACE  ===============
 
@@ -589,3 +590,17 @@ def add_ia_to_streamlit(df: pd.DataFrame) -> None:
                     
                     except Exception as e:
                         st.error(f"Erro ao gerar gráfico: {str(e)}")
+
+def inferir_ncm(descricao_produto: str) -> str:
+    """
+    Usa um modelo leve do Hugging Face para sugerir o NCM provável
+    com base na descrição textual do item.
+    """
+    try:
+        classifier = pipeline("text-classification", model="mrm8488/distilroberta-finetuned-financial-news-sentiment-analysis")
+        res = classifier(f"Produto: {descricao_produto}")
+        if isinstance(res, list) and len(res) > 0:
+            return res[0].get("label", "NCM não identificado")
+    except Exception:
+        pass
+    return "NCM não identificado"

@@ -289,6 +289,9 @@ def detectar_regime_tributario(dest_doc: Optional[str], emitente_doc: Optional[s
 
 # ==================== NOVA FUNÇÃO: EXTRAÇÃO DE ITENS ====================
 
+
+
+
 def extrair_itens_da_tabela(pdf_page) -> List[Dict[str, Any]]:
     """
     Extrai itens (produtos/serviços) de DANFE.
@@ -714,49 +717,65 @@ def extrair_capa_de_pdf(arquivo_pdf: str, progress_callback=None) -> dict:
 
 
 
-            # === 3️⃣ Detecta automaticamente os regimes tributários ===
-            regime_dest = detectar_regime_tributario(dest_doc=dados.get("dest_doc"), emitente_doc=None)
-            regime_emit = detectar_regime_tributario(dest_doc=dados.get("emitente_doc"), emitente_doc=None)
+            # === 3️⃣ Detecta regimes tributários separadamente ===
+            regime_destinatario = detectar_regime_tributario(
+                dest_doc=dados.get("dest_doc"),
+                emitente_doc=dados.get("emitente_doc")
+            )
+
+            regime_emitente = detectar_regime_tributario(
+                dest_doc=dados.get("emitente_doc")
+            )
+
+            # Salva ambos no dicionário principal
+            dados["regime_destinatario"] = regime_destinatario
+            dados["regime_emitente"] = regime_emitente
 
             # === 4️⃣ Define o regime final conforme combinação ===
-            if regime_dest == "normal" and regime_emit == "simples":
+            if regime_destinatario == "normal" and regime_emitente == "simples":
                 regime_final = "normal"
-            elif regime_dest == "simples" and regime_emit == "normal":
+            elif regime_destinatario == "simples" and regime_emitente == "normal":
                 regime_final = "misto"
             else:
-                regime_final = regime_dest or regime_emit or "normal"
+                regime_final = regime_destinatario or regime_emitente or "normal"
 
-            dados["regime_emit"] = regime_emit
-            dados["regime_dest"] = regime_dest
             dados["regime_final"] = regime_final
 
-            if DEBUG:
-                print(f"[DEBUG] Regimes detectados → Emitente: {regime_emit}, Destinatário: {regime_dest}, Final: {regime_final}")
-
-            # === 5️⃣ Enriquecimento fiscal por item ===
+            # === 5️⃣ Enriquecimento fiscal automático (corrigindo CFOP e NCM) ===
             if itens:
-                itens = enriquecer_itens(itens, uf_destino="BA", regime=regime_final)
+                itens_corrigidos = []
+                for item in itens:
+                    cfop = str(item.get("cfop", "")).replace(".", "").replace(",", "").strip()
+                    ncm = str(item.get("ncm", "")).replace(".", "").replace(",", "").strip()
+                    item["cfop"] = cfop
+                    item["ncm"] = ncm
+                    itens_corrigidos.append(item)
+
+                itens = enriquecer_itens(itens_corrigidos, uf_destino="BA", regime=regime_final)
 
             # === 6️⃣ Análise fiscal detalhada (destinatário) ===
             try:
                 if itens:
                     analise = analisar_nf_como_destinatario(
-                        cfop=str(itens[0].get("cfop", "")),
-                        ncm=str(itens[0].get("ncm", "")),
-                        csosn_ou_cst_recebido=str(itens[0].get("csosn", itens[0].get("ocst", ""))),
-                        regime_destinatario=regime_dest or "lucro_real",
-                        regime_emitente=regime_emit or "normal",
-                        uf_origem="BA",
-                        valor_total=dados.get("valor_total_num", 0.0),
-                        valor_icms=None,
-                        valor_pis=None,
-                        valor_cofins=None,
-                    )
+                    cfop=str(itens[0].get("cfop", "")),
+                    ncm=str(itens[0].get("ncm", "")),
+                    csosn_ou_cst_recebido=str(itens[0].get("csosn", itens[0].get("ocst", ""))),
+                    regime_destinatario=regime_destinatario or "normal",
+                    regime_emitente=regime_emitente or "normal",
+                    uf_origem="BA",
+                    valor_total=dados.get("valor_total_num", 0.0)
+)
+
+                    
                     dados["analise_destinatario"] = analise
                     dados["resumo_analise"] = gerar_resumo_analise(analise)
             except Exception as e:
                 if DEBUG:
                     print(f"[DEBUG] Erro ao analisar NF como destinatário: {e}")
+
+            # === Log para debug ===
+            if DEBUG:
+                print(f"[DEBUG] Regimes detectados → Emitente: {regime_emitente}, Destinatário: {regime_destinatario}, Final: {regime_final}")
 
             # === 7️⃣ Retorna resultado consolidado ===
             if capa_encontrada or itens:
