@@ -143,14 +143,16 @@ def extrair_emitente_do_filename(nome_arquivo: str) -> tuple[str | None, str | N
     return None, None
 
 
-def extrair_capa_de_texto(texto: str) -> dict:
-    """Extrai dados da capa com reconhecimento de seções"""
+def extrair_capa_de_texto(texto: str) -> dict[str, Any]:
+    """Extrai dados usando regex robustos (inspirado em parse_danfe_text)"""
     
-    # Se detectar rotação, inverter TODO o texto ANTES de dividir
     if detectar_rotacao(texto):
         if DEBUG:
             print("  🔄 Rotação detectada, invertendo texto...")
-        texto = texto[::-1]  # Inverter string inteira
+        texto = texto[::-1]
+    
+    # Normalizar: remover acentos e múltiplos espaços
+    texto_norm = re.sub(r"\s+", " ", texto)
     
     numero_nf: str | None = None
     serie: str | None = None
@@ -161,122 +163,54 @@ def extrair_capa_de_texto(texto: str) -> dict:
     data_emissao: str | None = None
     valor_total: str | None = None
 
-    linhas = texto.split("\n")
-
-    # ========== PASSO 1: Procurar campos diretos nos primeiros 50 linhas ==========
-    primeiras_linhas = "\n".join(linhas[:50])
-    
-    # Número da NF
-    m = re.search(r"N[°ºO]\.?\s*[:\-]?\s*(\d{1,3}\.\d{1,3}\.\d{3,6})", primeiras_linhas)
+    # ========== NF e Série ==========
+    m = re.search(r"N[oº]?\s*:?\s*(\d+)\s+S[ée]rie\s*:?\s*(\d+)", texto_norm, re.I)
     if m:
-        cand = m.group(1).replace(".", "")
-        numero_nf = str(int(cand))
+        numero_nf = m.group(1)
+        serie = m.group(2)
         if DEBUG:
-            print(f"    ✓ NF: {numero_nf}")
+            print(f"    ✓ NF: {numero_nf}, Série: {serie}")
     
-    # Série
-    m = re.search(r"S[ÉE]RIE\s*[:\-]?\s*(\d+)", primeiras_linhas, re.I)
-    if m:
-        serie = m.group(1)
-        if DEBUG:
-            print(f"    ✓ Série: {serie}")
-    
-    # Data
-    m = re.search(r"(?:Emiss[ãa]o|Data)\s*[:\-]?\s*(\d{2}/\d{2}/\d{4})", primeiras_linhas, re.I)
+    # ========== Data ==========
+    m = re.search(r"Emiss[ãa]o[^0-9]*(\d{2}/\d{2}/\d{4})", texto_norm, re.I)
     if m:
         data_emissao = m.group(1)
-    else:
-        m = RE_DATA.search(primeiras_linhas)
-        if m:
-            data_emissao = m.group(0)
+        if DEBUG:
+            print(f"    ✓ Data: {data_emissao}")
     
-    if DEBUG and data_emissao:
-        print(f"    ✓ Data: {data_emissao}")
-    
-    # Valor
-    m = re.search(r"Valor\s+Total\s*[:\-]?\s*R\$?\s*(\d{1,3}(?:\.\d{3})*,\d{2})", primeiras_linhas, re.I)
-    if not m:
-        m = re.search(r"Total\s*[:\-]?\s*R\$?\s*(\d{1,3}(?:\.\d{3})*,\d{2})", primeiras_linhas, re.I)
+    # ========== Valor Total ==========
+    m = re.search(r"Valor\s+Total(?:\s+da\s+Nota)?\s*[:\-]?\s*R\$?\s*(\d{1,3}(?:\.\d{3})*,\d{2})", texto_norm, re.I)
     if m:
         valor_total = m.group(1)
         if DEBUG:
             print(f"    ✓ Valor: {valor_total}")
     
-    # Destinatário
-    m = re.search(r"Destinat[áa]rio\s*[:\-]?\s*([A-Z][A-Z0-9 \.,]+?)(?:\n|$)", primeiras_linhas, re.I)
+    # ========== Emitente Nome ==========
+    m = re.search(r"(?:Emitente|Remetente)\s*[:\-]?\s*([^\n]{5,80}?)(?:\n|$)", texto_norm, re.I)
     if m:
-        dest_cand = m.group(1).strip()
-        if len(dest_cand) > 3 and "DANFE" not in dest_cand.upper():
-            dest_nome = dest_cand
-            if DEBUG and dest_nome:
-                print(f"    ✓ Dest: {dest_nome[:40]}")
-
-    # ========== PASSO 2: EMITENTE ==========
-    for i, ln in enumerate(linhas):
-        if "IDENTIFICAÇÃO DO EMITENTE" in ln.upper():
-            # Próximas linhas contêm nome e CNPJ do emitente
-            cnpj_encontrado = False
-            for j in range(i + 1, min(i + 20, len(linhas))):
-                linha = linhas[j].strip()
-                if not linha:
-                    continue
-                linha_up = linha.upper()
-                
-                # Parar se encontrou seção de destinatário ou DANFE
-                if "DESTINATÁRIO" in linha_up or "REMETENTE" in linha_up or "NATUREZA DA OPERAÇÃO" in linha_up:
-                    break
-                
-                # Pegar nome do emitente (primeira linha com texto significativo)
-                if not emitente_nome and len(linha) > 5:
-                    if not any(x in linha_up for x in ["DANFE", "DOCUMENTO", "ELETRÔNICA", "ENTRADA", "SAÍDA", "---", "CHAVE", "CEP:", "FONE:", "RUA", "AV", "AVENIDA", "TRAVESSA", "ESTRADA", "CONSULTA", "SÉRIE", "FOLHA", "BARRA", "SALVADOR", "0 -"]):
-                        emitente_nome = linha
-                        if DEBUG:
-                            print(f"    ✓ Nome Emit: {emitente_nome[:50]}")
-                
-                # Pegar CNPJ do emitente (linha com CNPJ formatado XX.XXX.XXX/XXXX-XX)
-                if not cnpj_encontrado:
-                    doc = achar_doc_em_linha(linha)
-                    if doc and len(somente_digitos(doc)) == 14:
-                        emitente_doc = doc
-                        cnpj_encontrado = True
-                        if DEBUG:
-                            print(f"    ✓ CNPJ Emit: {emitente_doc}")
-            break
-
-    # ========== PASSO 3: DESTINATÁRIO ==========
-    if not dest_doc:
-        for i, ln in enumerate(linhas):
-            if "DESTINATÁRIO" in ln.upper() or "REMETENTE" in ln.upper():
-                for j in range(i + 1, min(i + 8, len(linhas))):
-                    linha = linhas[j].strip()
-                    if not linha:
-                        continue
-                    linha_up = linha.upper()
-                    
-                    doc = achar_doc_em_linha(linha)
-                    if doc and len(somente_digitos(doc)) == 14:
-                        dest_doc = doc
-                        if DEBUG:
-                            print(f"    ✓ CNPJ Dest: {dest_doc}")
-                        if doc in linha:
-                            nome_cand = linha.split(doc)[0].strip()
-                            if nome_cand and len(nome_cand) > 3:
-                                dest_nome = nome_cand
-                        break
-                    
-                    if "RAZÃO" not in linha_up and "CNPJ" not in linha_up and "DATA" not in linha_up and len(linha) > 5:
-                        if not any(x in linha_up for x in ["RUA", "ENDERECO", "CEP", "FONE", "BAIRRO", "ENTRADA", "SAÍDA", "0 -", "1 -", "CONSULTA"]):
-                            dest_nome = linha
-                break
-
-    # ========== PASSO 4: VALOR TOTAL (fallback) ==========
-    if not valor_total:
-        for i, ln in enumerate(linhas):
-            if "VALOR TOTAL DA NOTA" in ln.upper():
-                v = pick_last_money_on_same_or_next_lines(linhas, i, 2)
-                if v:
-                    valor_total = v
-                    break
+        emitente_nome = m.group(1).strip()
+        if DEBUG and emitente_nome:
+            print(f"    ✓ Nome Emit: {emitente_nome[:50]}")
+    
+    # ========== CNPJ/CPF (prioriza emitente depois destinatário) ==========
+    docs = re.findall(r"(?:CNPJ|CPF)[^0-9]*([0-9\.\-/]{11,18})", texto_norm, re.I)
+    docs_limpos = [somente_digitos(d) for d in docs]
+    
+    if docs_limpos:
+        emitente_doc = docs_limpos[0]
+        if len(docs_limpos) > 1:
+            dest_doc = docs_limpos[1]
+        if DEBUG and emitente_doc:
+            print(f"    ✓ CNPJ Emit: {emitente_doc}")
+        if DEBUG and dest_doc:
+            print(f"    ✓ CNPJ Dest: {dest_doc}")
+    
+    # ========== Destinatário Nome ==========
+    m = re.search(r"(?:Destinat[aá]rio|Consumidor)\s*[:\-]?\s*([^\n]{3,80}?)(?:\n|$)", texto_norm, re.I)
+    if m:
+        dest_nome = m.group(1).strip()
+        if DEBUG and dest_nome:
+            print(f"    ✓ Nome Dest: {dest_nome[:50]}")
 
     resultado = cast(dict[str, Any], {
         "numero_nf": numero_nf,
