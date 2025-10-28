@@ -25,23 +25,23 @@ def classify_expense_hf(description: str, confidence_threshold: float = 0.5) -> 
     try:
         from transformers import pipeline
         
-        # Categorias contábeis brasileiras
+        # Corrigido: Categorias Fiscais e Financeiras Aprimoradas
         categories = [
-            "Infraestrutura IT",
-            "Software e Licenças",
-            "Marketing e Publicidade",
-            "Recursos Humanos",
-            "Viagem e Hospedagem",
-            "Materiais e Suprimentos",
-            "Consultoria e Outsourcing",
-            "Serviços Financeiros",
-            "Combustível e Transporte",
-            "Manutenção e Reparo",
-            "Energia e Água",
-            "Aluguel e Propriedade",
+            "Infraestrutura/Cloud IT",
+            "Software, ERP e Licenças",
+            "Consultoria e Auditoria",
+            "Marketing e Vendas",
+            "Recursos Humanos e Benefícios",
+            "Aluguel, IPTU e Condomínio",
+            "Despesas com Viagem e Hospedagem",
+            "Combustível, Fretes e Logística",
+            "Manutenção, Reparo e Serviços Gerais",
+            "Materiais de Escritório e Suprimentos",
+            "Serviços Financeiros (Juros, Taxas)",
+            "Impostos e Contribuições (Fed/Est/Mun)",
+            "Seguro (Patrimonial, Vida, Saúde)",
             "Educação e Treinamento",
-            "Seguro",
-            "Outro"
+            "Outros Gastos Operacionais"
         ]
         
         @st.cache_resource
