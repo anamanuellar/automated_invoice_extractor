@@ -5,6 +5,7 @@ from typing import Dict, List, Tuple, Any, Optional, Sequence, Union
 import warnings
 warnings.filterwarnings('ignore')
 
+
 # =============== HUGGING FACE  ===============
 
 def classify_expense_hf(description: str, confidence_threshold: float = 0.5) -> Dict[str, Any]:
@@ -302,67 +303,123 @@ def simple_forecast(values: List[float], periods: int = 30) -> Dict[str, Any]:
         }
 
 
-# =============== INTEGRAÇÃO COM STREAMLIT ===============
+# =============== INTEGRAÇÃO COM STREAMLIT (ADAPTADA) ===============
+
+def processar_e_exibir_classificacao_por_item(df: pd.DataFrame):
+    """
+    Novo bloco para selecionar NF, processar itens e exibir a classificação.
+    """
+    
+    # 1. Preparar lista de NFs que têm itens extraídos
+    df_com_itens = df[df['itens_nf'].apply(lambda x: isinstance(x, list) and len(x) > 0)]
+    
+    if df_com_itens.empty:
+        st.info("Nenhuma Nota Fiscal com dados de itens extraídos para classificação.")
+        return
+        
+    # Criar um identificador para seleção
+    df_com_itens['nf_id'] = df_com_itens.apply(
+        lambda row: f"NF {row['numero_nf']} - {row['emitente_nome']} (R$ {row['valor_total_num']:.2f})"
+        if row['valor_total_num'] is not None else f"NF {row['numero_nf']} - {row['emitente_nome']}", 
+        axis=1
+    )
+    
+    nf_selecionada_id = st.selectbox(
+        "Selecione uma Nota Fiscal com itens extraídos:",
+        df_com_itens['nf_id'].tolist()
+    )
+    
+    if not nf_selecionada_id:
+        return
+
+    # 2. Obter os dados da NF selecionada
+    nf_row = df_com_itens[df_com_itens['nf_id'] == nf_selecionada_id].iloc[0]
+    itens_nf: List[Dict[str, Any]] = nf_row['itens_nf']
+    
+    st.subheader(f"Análise de Itens da NF {nf_row.get('numero_nf', '')}")
+    
+    resultados_classificacao = []
+    total_classificado = 0.0
+
+    with st.spinner("Classificando cada item da Nota Fiscal..."):
+        for i, item in enumerate(itens_nf):
+            descricao = item.get('descricao_item', 'Descrição Vazia')
+            valor = item.get('valor_item', 0.0)
+            
+            # Chama a função de classificação para a descrição do ITEM
+            resultado_ia = classify_expense_hf(descricao)
+            
+            if resultado_ia['status'] == 'OK':
+                total_classificado += valor
+                resultados_classificacao.append({
+                    'Item': descricao,
+                    'Valor (R$)': f"{valor:.2f}",
+                    'Categoria Principal': resultado_ia['categoria'],
+                    'Confiança': f"{resultado_ia['confianca']:.1%}",
+                    'Alternativas': ', '.join([f"{k} ({v:.1%})" for k, v in resultado_ia['alternativas'].items()])
+                })
+            else:
+                # Se falhar, registra como 'Não Classificado'
+                 resultados_classificacao.append({
+                    'Item': descricao,
+                    'Valor (R$)': f"{valor:.2f}",
+                    'Categoria Principal': 'Não Classificado',
+                    'Confiança': '0%',
+                    'Alternativas': resultado_ia['status']
+                })
+    
+    # 3. Exibir resultados detalhados
+    if resultados_classificacao:
+        df_resultados = pd.DataFrame(resultados_classificacao)
+        st.dataframe(df_resultados, use_container_width=True)
+        
+        # 4. Sumarizar Rateio (Agrupamento por Categoria)
+        st.markdown("---")
+        st.markdown("### Resumo do Rateio por Categoria")
+        
+        # Converter a coluna Valor (R$) para float para o agrupamento
+        df_resultados['_ValorFloat'] = df_resultados['Valor (R$)'].apply(lambda x: float(x.replace(',', '') if isinstance(x, str) else x))
+        
+        rateio_sumario = df_resultados.groupby('Categoria Principal').agg(
+            Valor_Total=('Valor (R$)', lambda x: x.astype(str).str.replace(',', '').astype(float).sum()),
+            Num_Itens=('Item', 'count')
+        ).reset_index()
+        
+        rateio_sumario['% da NF'] = (rateio_sumario['Valor_Total'] / nf_row['valor_total_num']) * 100
+        
+        rateio_sumario = rateio_sumario.sort_values(by='Valor_Total', ascending=False)
+        rateio_sumario['Valor_Total'] = rateio_sumario['Valor_Total'].map('R$ {:,.2f}'.format)
+        rateio_sumario['% da NF'] = rateio_sumario['% da NF'].map('{:.1f}%'.format)
+        
+        st.dataframe(rateio_sumario, use_container_width=True)
+        
+        st.success(f"**Total da NF (Capa):** R$ {nf_row.get('valor_total_num', 0):.2f}")
+        st.info(f"**Total de Itens Classificados:** R$ {total_classificado:.2f}")
+
 
 def add_ia_to_streamlit(df: pd.DataFrame) -> None:
-    """
-    Adiciona seção de IA ao seu app Streamlit
-    
-    Uso:
-        from ia_simples_corrigido import add_ia_to_streamlit
-        
-        if not df.empty:
-            add_ia_to_streamlit(df)
-    """
+    # ... (Seu código existente)
     
     st.divider()
     st.subheader("🤖 Análise com Inteligência Artificial")
     
+    # Adaptar as abas
     tab1, tab2, tab3, tab4 = st.tabs([
-        "Classificação", 
+        "Classificação (por Item)", # Renomeado
         "Anomalias", 
         "Fornecedores",
         "Previsão"
     ])
     
-    # TAB 1: Classificação
+    # TAB 1: Classificação (Classificação manual removida, agora focada em itens)
     with tab1:
-        st.markdown("### Classificação de Despesas")
+        st.markdown("### Classificação Detalhada de Despesas por Item")
         
-        col1, col2 = st.columns([3, 1])
-        
-        with col1:
-            descricao = st.text_input(
-                "Descrição do produto/serviço:",
-                placeholder="Ex: Amazon Web Services - Cloud Hosting"
-            )
-        
-        with col2:
-            metodo = st.selectbox(
-                "Método IA:",
-                ["Hugging Face (Grátis)"]  # Apenas Hugging Face por enquanto
-            )
-        
-        if descricao:
-            with st.spinner("Analisando..."):
-                resultado = classify_expense_hf(descricao)
-            
-            if resultado['status'] == 'OK':
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    st.success(f"**Categoria:** {resultado.get('categoria', 'Desconhecido')}")
-                    st.info(f"**Confiança:** {resultado.get('confianca', 0):.1%}")
-                
-                with col2:
-                    alternativas = resultado.get('alternativas', {})
-                    if alternativas:
-                        st.markdown("**Alternativas:**")
-                        for idx, (cat, conf) in enumerate(list(alternativas.items())[:2]):
-                            st.caption(f"• {cat}: {conf:.1%}")
-            else:
-                st.error(f"Erro: {resultado.get('status', 'Desconhecido')}")
-    
+        if 'itens_nf' in df.columns:
+            # Chama a nova função que processa a classificação por item
+            processar_e_exibir_classificacao_por_item(df)
+        else:
+            st.error("A coluna 'itens_nf' não foi encontrada no DataFrame. Por favor, certifique-se de que a função 'extrair_capa_de_pdf' do seu extrator foi atualizada para extrair os itens.")
     # TAB 2: Anomalias
     with tab2:
         st.markdown("### Detecção de Anomalias")
