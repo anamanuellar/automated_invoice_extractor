@@ -5,7 +5,8 @@ import os
 from pathlib import Path
 from datetime import datetime
 import pandas as pd
-from extrator import processar_pdfs
+from extrator import processar_pdfs, gerar_relatorio_pdf, exportar_para_excel_com_itens
+from codigos_fiscais_destinatario import gerar_resumo_analise, analisar_nf_como_destinatario
 from ia_simples import (
     classify_expense_hf,
     analyze_supplier_risk,
@@ -15,7 +16,6 @@ from ia_simples import (
 import io
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
-
 
 # =============== FUNÇÃO AUXILIAR ===============
 def exportar_para_excel(df) -> bytes:
@@ -49,7 +49,6 @@ def exportar_para_excel(df) -> bytes:
     
     output.seek(0)
     return output.getvalue()
-
 
 # =============== CONFIG STREAMLIT ===============
 st.set_page_config(
@@ -120,6 +119,8 @@ uploaded_files = st.file_uploader(
     accept_multiple_files=True,
     help="Você pode enviar múltiplos PDFs de uma vez"
 )
+
+df_filtrado = pd.DataFrame()  # evita erro de variável não definida
 
 if uploaded_files:
     # Criar pasta temporária
@@ -215,34 +216,57 @@ if uploaded_files:
                         "arquivo": st.column_config.TextColumn("Arquivo", width=150),
                     }
                 )
-                # ========== NOVA SEÇÃO: IA ==========
 
+                # ========== NOVO BLOCO: RESUMO DA ANÁLISE ==========
+                with st.expander("📊 Resumo da Análise Fiscal"):
+                    st.markdown("Gere a análise fiscal detalhada de uma NF específica ou veja um resumo consolidado.")
+
+                    if not df_filtrado.empty:
+                        nf_escolhida = st.selectbox(
+                            "Selecione o número da NF para análise detalhada:",
+                            df_filtrado["numero_nf"].astype(str).unique()
+                        )
+
+                        if st.button("Gerar Resumo da Análise"):
+                            nf_dados = df_filtrado[df_filtrado["numero_nf"].astype(str) == nf_escolhida].iloc[0]
+
+                            analise_nf = analisar_nf_como_destinatario(
+                                cfop=nf_dados.get("cfop", ""),
+                                ncm=nf_dados.get("ncm", ""),
+                                csosn_ou_cst_recebido=nf_dados.get("csosn") or nf_dados.get("ocst") or "",
+                                regime_destinatario=nf_dados.get("regime_tributario", "normal"),
+                                regime_emitente=nf_dados.get("regime_emitente", "simples"),
+                                uf_origem=nf_dados.get("uf_origem", "BA"),
+                                valor_total=float(nf_dados.get("valor_total_num", 0.0))
+                            )
+
+                            resumo_txt = gerar_resumo_analise(analise_nf)
+                            st.text(resumo_txt)
+
+                            if st.button("📄 Exportar Resumo em PDF"):
+                                gerar_relatorio_pdf(pd.DataFrame([analise_nf]))
+                                st.success("📄 Resumo exportado como PDF com sucesso!")
+
+                # ========== SEÇÃO IA ==========
                 st.divider()
-
-                # 🤖 Adicionar seção de IA
                 add_ia_to_streamlit(df_filtrado)
                 
-                st.divider()
-                
                 # Download Excel
+                st.divider()
                 st.subheader("📥 Exportar Resultados")
                 
-                from extrator import exportar_para_excel_com_itens
                 excel_data = exportar_para_excel_com_itens(df_filtrado)
-
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 
                 col1, col2 = st.columns(2)
-                
                 with col1:
                     st.download_button(
                         label="📊 Baixar como Excel",
                         data=excel_data,
                         file_name=f"notas_fiscais_{timestamp}.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        width="stretch"
+                        use_container_width=True
                     )
-                
                 with col2:
                     csv_data = df_filtrado.to_csv(index=False, encoding='utf-8-sig')
                     st.download_button(
@@ -250,20 +274,19 @@ if uploaded_files:
                         data=csv_data,
                         file_name=f"notas_fiscais_{timestamp}.csv",
                         mime="text/csv",
-                        width="stretch"
+                        use_container_width=True
                     )
-                
+
                 # Estatísticas avançadas
                 st.divider()
                 st.subheader("📈 Análise")
-                
+
                 col1, col2 = st.columns(2)
-                
                 with col1:
                     st.markdown("**Top 5 Emitentes**")
                     top_emitentes = df['emitente_nome'].value_counts().head(5)
                     st.bar_chart(top_emitentes)
-                
+
                 with col2:
                     st.markdown("**Distribuição de Valores**")
                     if (df['valor_total_num'] > 0).any():
@@ -272,24 +295,24 @@ if uploaded_files:
                         st.plotly_chart(fig)
                     else:
                         st.info("Sem valores para exibir")
-                
+
             else:
                 st.warning("❌ Nenhuma nota fiscal foi extraída dos arquivos.")
                 st.info("Verifique se os PDFs contêm dados de notas fiscais válidas.")
-        
+
         except Exception as e:
             st.error(f"❌ Erro ao processar arquivos: {str(e)}")
             st.info("Por favor, verifique os arquivos e tente novamente.")
-    
+
     # Limpeza
     for pdf_path in pdf_paths:
         try:
             os.remove(pdf_path)
-        except:
+        except Exception:
             pass
     try:
         os.rmdir(temp_dir)
-    except:
+    except Exception:
         pass
 
 else:
@@ -299,28 +322,13 @@ else:
         st.markdown("""
         ### Passo a Passo:
         
-        1. **Clique em "Browse files"** para selecionar seus PDFs
-        2. **Você pode enviar múltiplos arquivos** de uma vez
-        3. **O sistema irá:**
-           - Extrair dados de cada NF
-           - Buscar nomes de empresas via CNPJ
-           - Organizar os dados em tabela
-        4. **Baixe os resultados** em Excel ou CSV
-        
-        ### Dados Extraídos:
-        - ✓ Número da Nota Fiscal
-        - ✓ Série
-        - ✓ Data de Emissão
-        - ✓ CNPJ/CPF do Emitente
-        - ✓ Nome do Emitente
-        - ✓ CNPJ/CPF do Destinatário
-        - ✓ Nome do Destinatário
-        - ✓ Valor Total
-        
-        ### Observações:
-        - Funciona com PDFs escaneados (usa OCR)
-        - Enriquece automaticamente nomes com APIs de CNPJ
-        - Suporta Notas Fiscais Eletrônicas (NF-e)
+        1. **Clique em 'Browse files'** para selecionar seus PDFs  
+        2. **Você pode enviar múltiplos arquivos** de uma vez  
+        3. **O sistema irá:**  
+           - Extrair dados de cada NF  
+           - Buscar nomes de empresas via CNPJ  
+           - Organizar os dados em tabela  
+        4. **Baixe os resultados** em Excel ou CSV  
         """)
 
 st.divider()

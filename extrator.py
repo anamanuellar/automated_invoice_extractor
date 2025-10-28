@@ -901,10 +901,28 @@ def exportar_para_excel_com_itens(df: pd.DataFrame) -> bytes:
                     "credito_icms": analise["credito_icms"]["valor"] if analise.get("credito_icms") else None,
                     "credito_pis": analise["credito_pis"]["valor"] if analise.get("credito_pis") else None,
                     "credito_cofins": analise["credito_cofins"]["valor"] if analise.get("credito_cofins") else None,
-                    "resumo_analise": row.get("resumo_analise"),
+                    #   "resumo_analise": row.get("resumo_analise"),
                 })
         if analises:
             pd.DataFrame(analises).to_excel(writer, sheet_name="Análise Fiscal", index=False)
 
     output.seek(0)
     return output.getvalue()
+
+def gerar_relatorio_pdf(df_resumo):
+    from fpdf import FPDF
+
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", "B", 14)
+    pdf.cell(0, 10, "Resumo da Análise Fiscal", ln=True, align="C")
+    pdf.ln(10)
+    pdf.set_font("Arial", size=10)
+
+    for i, row in df_resumo.iterrows():
+        for col, val in row.items():
+            pdf.cell(0, 8, f"{col}: {val}", ln=True)
+        pdf.ln(5)
+
+    pdf.output("resumo_analise.pdf")
+    st.success("📄 PDF gerado com sucesso: resumo_analise.pdf")
