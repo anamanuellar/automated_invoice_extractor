@@ -143,24 +143,26 @@ def extrair_capa_de_texto(texto: str) -> dict:
                     serie = m.group(1)
 
     # -------- EMITENTE --------
-    for i, ln in enumerate(linhas):
-        up = ln.upper()
-        if "IDENTIFICAÇÃO DO EMITENTE" in up:
-            for j in range(i + 1, min(i + 10, len(linhas))):
-                linha_emit = linhas[j].strip()
-                doc_emit = achar_doc_em_linha(linha_emit)
-                if doc_emit and len(somente_digitos(doc_emit)) == 14:
-                    emitente_doc = doc_emit
-                if linha_emit and len(linha_emit) > 5:
-                    if not any(x in up for x in ["DANFE","DOCUMENTO","AUXILIAR","CEP","ENDEREÇO","FONE","CNPJ","CPF"]):
-                        if doc_emit and doc_emit in linha_emit:
-                            nome_cand = linha_emit.split(doc_emit)[0].strip()
-                            if nome_cand and len(nome_cand) > 3 and nome_cand not in ["", "1", "0"]:
-                                emitente_nome = nome_cand
-                        elif not emitente_doc and not doc_emit and len(linha_emit) > 5:
-                            if not re.search(r"^\d+$", linha_emit):
-                                emitente_nome = linha_emit
-            break
+
+    def extrair_emitente(texto: str):
+        # Padrão explícito para CNPJ com borda de palavra para evitar falsos positivos
+        cnpjs = re.findall(r"\b\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}\b", texto)
+        emitente_doc = None
+        emitente_nome = None
+        if cnpjs:
+            emitente_doc = cnpjs[0]  # tipicamente o primeiro CNPJ é do emitente
+            # Buscar trecho antes do CNPJ para tentar capturar o nome do emitente
+            idx = texto.find(emitente_doc)
+            trecho_antes = texto[max(0, idx-150):idx].strip()
+            linhas = trecho_antes.split("\n")
+            # considerar as últimas linhas do trecho como nome possível
+            for linha in reversed(linhas):
+                linha_limpa = linha.strip()
+                if linha_limpa and not any(palavra in linha_limpa.upper() for palavra in ["CNPJ", "CPF", "ENDEREÇO", "RAZÃO", "NOTA", "EMITENTE"]):
+                    emitente_nome = linha_limpa
+                    break
+        return emitente_doc, emitente_nome
+
 
     # -------- DESTINATÁRIO --------
     for i, ln in enumerate(linhas):
