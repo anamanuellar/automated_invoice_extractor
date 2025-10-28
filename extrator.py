@@ -128,78 +128,84 @@ def consulta_cnpj_api(cnpj: str) -> Optional[str]:
 
 def extrair_itens_da_tabela(pdf_page) -> List[Dict[str, Any]]:
     """
-    Extrai itens (produtos/serviços) da NF-e mesmo quando não há tabela formal.
-    Faz fallback automático usando extract_words e regex.
+    Extrai itens de produtos/serviços com colunas separadas.
+    Captura Código, Descrição, NCM, CFOP, Unidade, Quantidade, Valor Unitário e Valor Total.
     """
     itens_extraidos: List[Dict[str, Any]] = []
 
     try:
-        # === 1. Tentativa padrão com pdfplumber ===
-        tables = pdf_page.extract_tables({
-            "vertical_strategy": "text",
-            "horizontal_strategy": "text",
-            "snap_x_tolerance": 5,
-            "snap_y_tolerance": 3,
-            "join_tolerance": 3,
-        })
+        # Configuração refinada para manter estrutura de tabela
+        table_settings = {
+            "vertical_strategy": "lines",       # usa linhas visuais para separar colunas
+            "horizontal_strategy": "lines",     # idem para linhas horizontais
+            "intersection_tolerance": 5,
+            "snap_tolerance": 3,
+            "join_tolerance": 2,
+            "text_x_tolerance": 2,
+            "text_y_tolerance": 2,
+            "edge_min_length": 20
+        }
+
+        tables = pdf_page.extract_tables(table_settings)
 
         for table in tables:
             if not table or len(table) < 2:
                 continue
 
             header = [str(c).upper().strip() for c in table[0] if c]
-            mapa = {}
-            for i, h in enumerate(header):
-                if any(k in h for k in ["DESCRIÇÃO", "PRODUTO", "SERVIÇO"]):
-                    mapa["desc"] = i
-                elif any(k in h for k in ["VALOR TOTAL", "VL TOTAL", "VALOR", "TOTAL R$"]):
-                    mapa["valor"] = i
-
-            if "desc" not in mapa or "valor" not in mapa:
-                continue
+            if not any("DESCRI" in h or "PRODUTO" in h for h in header):
+                continue  # garante que é a tabela de itens
 
             for row in table[1:]:
-                if not row or len(row) <= max(mapa.values()):
+                # Evita linhas vazias
+                if not any(row):
                     continue
-                descricao = str(row[mapa["desc"]]).strip()
-                valor = str(row[mapa["valor"]]).strip()
-                val_num = moeda_to_float(valor)
-                if not val_num:
-                    m = re.search(r"(\d+(?:[.,]\d{2,3}))", valor)
-                    if m: val_num = moeda_to_float(m.group(1))
-                if len(descricao) > 4 and val_num and val_num > 0.01:
-                    itens_extraidos.append({
-                        "descricao_item": descricao,
-                        "valor_item": round(val_num, 2)
-                    })
 
-        # === 2. Fallback: varrer o texto por linhas ===
+                # Normaliza o tamanho (preenche até 10 colunas)
+                row = (row + [""] * 10)[:10]
+
+                # Tenta converter campos numéricos
+                def num(v):
+                    v = str(v).replace(".", "").replace(",", ".").strip()
+                    try:
+                        return float(v)
+                    except:
+                        return None
+
+                item = {
+                    "codigo": str(row[0]).strip(),
+                    "descricao": str(row[1]).strip(),
+                    "ncm": str(row[2]).strip(),
+                    "cfop": str(row[4]).strip(),
+                    "unidade": str(row[5]).strip(),
+                    "quantidade": num(row[6]),
+                    "valor_unit": num(row[7]),
+                    "valor_total": num(row[8]),
+                }
+
+                # Mantém apenas linhas com descrição e valor
+                if item["descricao"] and item["valor_total"]:
+                    itens_extraidos.append(item)
+
+        # Caso não ache tabela formal, tenta fallback textual
         if not itens_extraidos:
-            words = pdf_page.extract_words()
-            linhas = {}
-            for w in words:
-                y = round(w["top"] / 5) * 5
-                linhas.setdefault(y, []).append(w["text"])
-
-            for _, palavras in sorted(linhas.items()):
-                linha = " ".join(palavras)
-                if len(linha) < 10:
-                    continue
-                if any(k in linha.upper() for k in ["CÓDIGO", "PRODUTO", "DESCRIÇÃO", "TOTAL", "ICMS", "IPI"]):
-                    continue
-                m = re.search(r"(\d{1,3}(?:[.,]\d{3})*[.,]\d{2,3})", linha)
-                if m:
-                    valor = moeda_to_float(m.group(1))
-                    if valor and valor > 0:
-                        desc = linha.split(m.group(1))[0].strip()
-                        if len(desc) > 4:
+            text = pdf_page.extract_text() or ""
+            linhas = text.split("\n")
+            for ln in linhas:
+                if re.search(r"\d{1,3}(?:[.,]\d{3})*[.,]\d{2}", ln):
+                    if len(ln.split()) > 5:
+                        partes = ln.strip().split()
+                        descricao = " ".join(partes[1:-3])
+                        valor_total = moeda_to_float(partes[-1])
+                        if valor_total:
                             itens_extraidos.append({
-                                "descricao_item": desc,
-                                "valor_item": round(valor, 2)
+                                "codigo": partes[0],
+                                "descricao": descricao,
+                                "valor_total": valor_total
                             })
 
         if DEBUG:
-            print(f"[DEBUG] Página {pdf_page.page_number}: {len(itens_extraidos)} itens encontrados")
+            print(f"[DEBUG] Página {pdf_page.page_number}: {len(itens_extraidos)} itens com colunas capturados")
 
         return itens_extraidos
 
