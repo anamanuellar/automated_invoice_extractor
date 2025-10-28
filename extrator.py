@@ -126,20 +126,21 @@ def consulta_cnpj_api(cnpj: str) -> Optional[str]:
 
 # ==================== NOVA FUNÇÃO: EXTRAÇÃO DE ITENS ====================
 
+# No arquivo extrator.py, substitua a função extrair_itens_da_tabela pela seguinte:
+
 def extrair_itens_da_tabela(pdf_page) -> List[Dict[str, Any]]:
     """
     Tenta extrair a tabela de itens (produtos/serviços) da página.
-    Ajustada para maior tolerância na detecção de colunas.
+    Ajustada para máxima flexibilidade e correção de erros.
     """
     
-    # Usar uma estratégia mista para ser mais flexível
+    # Usar a estratégia de texto (mais flexível) com tolerância
     table_settings = {
-        "vertical_strategy": "lines", # Tentar linhas verticais primeiro
-        "horizontal_strategy": "text", # Usar o alinhamento do texto para linhas horizontais
+        "vertical_strategy": "text", 
+        "horizontal_strategy": "text", 
         "snap_x_tolerance": 5,
-        "snap_y_tolerance": 5,
-        # NFe padrão muitas vezes usa headings: CÓD, PRODUTO, QTD, UN, V.UNIT, V.TOTAL
-        "explicit_vertical_lines": [], # Pode ser ajustado se soubermos a estrutura
+        "snap_y_tolerance": 3,
+        "join_tolerance": 3,
     }
 
     try:
@@ -152,58 +153,76 @@ def extrair_itens_da_tabela(pdf_page) -> List[Dict[str, Any]]:
             if not table or len(table) < 2:
                 continue
 
-            # Mapeamento dinâmico baseado em palavras-chave em qualquer lugar do cabeçalho
-            header_row = [str(c).upper().strip().replace('\n', ' ') for c in table[0] if c is not None]
+            # Mapeamento dinâmico baseado em palavras-chave no cabeçalho
+            header_row_raw = table[0]
+            header_row = [str(c).upper().strip().replace('\n', ' ') for c in header_row_raw if c is not None]
             
             mapa_colunas = {}
             
+            # Tentar encontrar a melhor coluna de descrição e valor
             for i, col_name in enumerate(header_row):
-                # Palavras-chave para a descrição do item
-                if any(kw in col_name for kw in ['DESCRIÇÃO', 'PRODUTO', 'SERVIÇO', 'DENOMINAÇÃO']):
-                    mapa_colunas['descricao'] = i
-                # Palavras-chave para o valor total (evitando impostos)
-                elif any(kw in col_name for kw in ['V.TOTAL', 'VALOR TOTAL', 'TOTAL', 'LÍQUIDO']) and not any(kw in col_name for kw in ['ICMS', 'IPI', 'ISS']):
+                if 'DESCRIÇÃO' in col_name or 'PRODUTO' in col_name or 'SERVIÇO' in col_name:
+                    if 'descricao' not in mapa_colunas:
+                        mapa_colunas['descricao'] = i
+                        
+                elif 'VALOR TOTAL' in col_name or ('TOTAL' in col_name and 'UNIT' not in col_name and 'TOT' in col_name):
                     mapa_colunas['valor_total'] = i
-                # Palavras-chave para a quantidade (opcional, mas ajuda a validar)
-                elif any(kw in col_name for kw in ['QUANTIDADE', 'QTDE', 'QTD']):
-                    mapa_colunas['quantidade'] = i
-            
-            # Condição mínima: precisamos da descrição e do valor total
-            if 'descricao' in mapa_colunas and 'valor_total' in mapa_colunas:
                 
+                elif 'UNIT' in col_name and 'VALOR' in col_name and 'valor_total' not in mapa_colunas:
+                    mapa_colunas['valor_unit'] = i
+            
+            # Condição mínima: precisamos da descrição e de alguma coluna de valor
+            if 'descricao' in mapa_colunas and ('valor_total' in mapa_colunas or 'valor_unit' in mapa_colunas):
+                
+                # CORREÇÃO CRÍTICA DO ERRO 'Operator ">=" not supported for "None"'
+                # Usa 'mapa_colunas.get(key)' para garantir que o índice 0 (válido) não seja tratado como False
+                valor_col_index = mapa_colunas.get('valor_total')
+                if valor_col_index is None:
+                    valor_col_index = mapa_colunas.get('valor_unit')
+                
+                # Se, por segurança, valor_col_index ainda for None, pulamos esta tabela.
+                if valor_col_index is None:
+                    continue
+                
+                desc_col_index = mapa_colunas['descricao']
+
                 # Vamos percorrer as linhas a partir da segunda (índice 1)
                 for row_idx, row in enumerate(table):
                     if row_idx == 0: continue # Ignorar cabeçalho
 
-                    # Garantir que a linha tenha pelo menos o tamanho do índice máximo
-                    if max(mapa_colunas.values()) >= len(row):
+                    if not any(c for c in row if c is not None):
+                        continue
+
+                    # Garantir que a linha tem o tamanho esperado
+                    # O erro foi corrigido, pois valor_col_index é garantido ser um INT aqui
+                    if valor_col_index >= len(row) or desc_col_index >= len(row): 
                         continue
                         
-                    descricao_raw = row[mapa_colunas['descricao']]
-                    valor_raw = row[mapa_colunas['valor_total']]
+                    descricao_raw = row[desc_col_index]
+                    valor_raw = row[valor_col_index]
                     
                     descricao_str = str(descricao_raw).strip() if descricao_raw else ""
                     valor_str = str(valor_raw).strip() if valor_raw else ""
 
-                    # Validação: Descrição deve ter mais de 5 caracteres E o valor deve ser numérico
-                    if len(descricao_str) > 5 and moeda_to_float(valor_str) is not None:
+                    valor_num = moeda_to_float(valor_str)
+                    
+                    if len(descricao_str) > 5 and valor_num is not None and valor_num > 0.01:
                         
-                        # Tenta capturar o valor total da NF se a linha for o totalizador
-                        if descricao_str.upper() in ["VALOR TOTAL DA NOTA", "TOTAL GERAL", "VALOR TOTAL"]:
+                        if descricao_str.upper() in ["DADOS DOS", "PRODUTOS/SERVIÇOS", "OBSERVAÇÕES", "INF. COMPLEMENTARES"]:
                             continue
                             
                         itens_extraidos.append({
                             'descricao_item': descricao_str,
-                            'valor_item': moeda_to_float(valor_str)
+                            'valor_item': valor_num
                         })
 
         return itens_extraidos
 
     except Exception as e:
         if DEBUG:
-            print(f"[DEBUG] Erro na extração de itens da tabela: {e}")
+            print(f"[DEBUG] Erro final na extração de itens da tabela: {e}")
         return []
-    
+
 # ==================== FUNÇÕES DE EXTRAÇÃO (ADAPTADAS) ====================
 
 def extrair_capa_de_texto(texto: str) -> dict:
@@ -365,7 +384,6 @@ def extrair_texto_ocr(arquivo_pdf, progress_callback=None):
 
 # FUNÇÃO PRINCIPAL ADAPTADA para retornar ITENS
 
-# No arquivo extrator.py, substitua a função extrair_capa_de_pdf pela seguinte:
 
 def extrair_capa_de_pdf(arquivo_pdf: str, progress_callback=None) -> dict:
     nome_arquivo = Path(arquivo_pdf).name
