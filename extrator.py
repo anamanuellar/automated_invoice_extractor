@@ -81,22 +81,54 @@ def pick_last_money_on_same_or_next_lines(linhas, idx, max_ahead=6):
     return None
 
 # Consulta API para enriquecer nome emitente a partir do CNPJ
+# Consulta API para enriquecer nome emitente a partir do CNPJ
 def consulta_cnpj_api(cnpj: str) -> Optional[str]:
     cnpj_digits = somente_digitos(cnpj)
     if cnpj_digits in CNPJ_CACHE:
         return CNPJ_CACHE[cnpj_digits]
+    
+    # Adicionar uma pequena pausa antes de cada requisição para tentar evitar rate limiting
+    time.sleep(0.5) 
+
     url = f"https://www.receitaws.com.br/v1/cnpj/{cnpj_digits}"
     try:
         response = requests.get(url, timeout=10)
+        
         if response.status_code == 200:
             data = response.json()
+            # A API retorna um status "ERROR" ou "OK"
             if isinstance(data, dict) and data.get("status") == "OK":
                 nome_empresarial = data.get("nome")
                 CNPJ_CACHE[cnpj_digits] = nome_empresarial
                 return nome_empresarial
+            elif isinstance(data, dict) and data.get("status") == "ERROR":
+                if DEBUG:
+                    print(f"[DEBUG] Erro da API na consulta do CNPJ {cnpj}: {data.get('message')}")
+                # Não armazenar no cache se houver erro na API
+                return None
+        elif response.status_code == 429: # Rate limit
+            if DEBUG:
+                print(f"[DEBUG] Rate Limit (429) para o CNPJ {cnpj}. Tentando novamente em 5 segundos.")
+            # Pausa mais longa se atingir o limite de taxa e tenta novamente
+            time.sleep(5)
+            return consulta_cnpj_api(cnpj)
+        
+        # Para outros erros HTTP (e.g., 5xx), não armazenar no cache
+        if DEBUG:
+            print(f"[DEBUG] Erro HTTP {response.status_code} na consulta do CNPJ {cnpj}")
+        
+    except requests.exceptions.Timeout:
+        if DEBUG:
+            print(f"[DEBUG] Timeout na consulta do CNPJ {cnpj}")
+    except requests.exceptions.RequestException as e:
+        if DEBUG:
+            print(f"[DEBUG] Erro de requisição na consulta do CNPJ {cnpj}: {e}")
     except Exception as e:
         if DEBUG:
-            print(f"[DEBUG] Erro na consulta do CNPJ {cnpj}: {e}")
+            print(f"[DEBUG] Erro inesperado na consulta do CNPJ {cnpj}: {e}")
+            
+    # Se falhar, armazenar None para não tentar novamente imediatamente
+    CNPJ_CACHE[cnpj_digits] = None
     return None
 
 # =============== EXTRAÇÃO DE TEXTO ===============
