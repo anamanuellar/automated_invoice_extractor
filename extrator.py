@@ -122,6 +122,7 @@ def pick_last_money_on_same_or_next_lines(linhas, idx, max_ahead=6):
     v = pick(linhas[k])
     if v: return v
   return None
+  
 
 # Consulta API para enriquecer nome emitente a partir do CNPJ (Corrigida)
 
@@ -291,14 +292,15 @@ def detectar_regime_tributario(dest_doc: Optional[str], emitente_doc: Optional[s
 def extrair_itens_da_tabela(pdf_page) -> List[Dict[str, Any]]:
     """
     Extrai itens (produtos/serviços) de DANFE.
-    Estratégia híbrida:
-      1. Tenta extrair tabela formal com pdfplumber.
-      2. Se falhar, usa fallback com coordenadas e regex.
+    Estratégia híbrida com heurística de agrupamento:
+      1. Usa pdfplumber para extrair tabelas.
+      2. Reagrupa linhas quebradas com base em colunas numéricas ausentes.
+      3. Fallback OCR posicional se não houver tabela formal.
     """
     itens_extraidos: List[Dict[str, Any]] = []
 
     try:
-        # === 1. Tentativa: tabela estruturada ===
+        # === 1️⃣ Tentativa: Tabela estruturada com pdfplumber ===
         tables = pdf_page.extract_tables({
             "vertical_strategy": "lines",
             "horizontal_strategy": "lines",
@@ -318,33 +320,59 @@ def extrair_itens_da_tabela(pdf_page) -> List[Dict[str, Any]]:
             if not any("DESCRI" in h or "PRODUTO" in h for h in header):
                 continue
 
+            # =======================
+            # HEURÍSTICA DE AGRUPAMENTO
+            # =======================
+            linhas_itens = []
+            buffer = None  # linha sendo construída
+
             for row in table[1:]:
                 if not any(row):
                     continue
                 row = (row + [""] * 12)[:12]
 
-                def num(v):
+                def to_float(v):
                     s = str(v).replace(".", "").replace(",", ".").strip()
                     try:
                         return float(s)
                     except:
                         return None
 
-                item = {
+                # detecta se a linha atual parece incompleta
+                valor_total = to_float(row[8])
+                ncm = str(row[2]).strip()
+                cfop = str(row[4]).strip()
+
+                # se não há valor total ou cfop/ncm → é continuação da linha anterior
+                if (not valor_total and not cfop and not ncm and buffer):
+                    buffer["descricao"] += " " + str(row[1]).strip()
+                    continue
+
+                # se houver valor total, é uma nova linha completa
+                if buffer:
+                    linhas_itens.append(buffer)
+
+                buffer = {
                     "codigo": str(row[0]).strip(),
                     "descricao": str(row[1]).strip(),
                     "ncm": str(row[2]).strip(),
                     "cfop": str(row[4]).strip(),
                     "unidade": str(row[5]).strip(),
-                    "quantidade": num(row[6]),
-                    "valor_unit": num(row[7]),
-                    "valor_total": num(row[8]),
+                    "quantidade": to_float(row[6]),
+                    "valor_unit": to_float(row[7]),
+                    "valor_total": to_float(row[8]),
                 }
 
-                if item["descricao"] and item["valor_total"]:
+            # adiciona o último buffer se existir
+            if buffer:
+                linhas_itens.append(buffer)
+
+            # filtra itens válidos
+            for item in linhas_itens:
+                if item.get("descricao") and item.get("valor_total"):
                     itens_extraidos.append(item)
 
-        # === 2. Fallback: texto posicional (caso sem bordas) ===
+        # === 2️⃣ Fallback: Texto posicional (caso sem linhas de tabela) ===
         if not itens_extraidos:
             words = pdf_page.extract_words()
             linhas = {}
@@ -379,7 +407,7 @@ def extrair_itens_da_tabela(pdf_page) -> List[Dict[str, Any]]:
                             })
 
         if DEBUG:
-            print(f"[DEBUG] Página {pdf_page.page_number}: {len(itens_extraidos)} itens encontrados")
+            print(f"[DEBUG] Página {pdf_page.page_number}: {len(itens_extraidos)} itens encontrados (agrupamento aplicado)")
 
         return itens_extraidos
 
@@ -387,6 +415,7 @@ def extrair_itens_da_tabela(pdf_page) -> List[Dict[str, Any]]:
         if DEBUG:
             print(f"[DEBUG] Erro na extração híbrida de itens: {e}")
         return []
+
 
 # ==================== CLASSIFICAÇÃO CONTÁBIL AUTOMÁTICA ====================
 
