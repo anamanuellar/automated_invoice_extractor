@@ -430,8 +430,14 @@ def enriquecer_itens(itens, uf_destino="BA", regime="simples"):
             analise = {}
 
         # ✅ Extrai campos de forma segura
-        cfop_info = analise.get("cfop_info", {}) if isinstance(analise, dict) else {}
-        ncm_info = analise.get("ncm_info", {}) if isinstance(analise, dict) else {}
+# ✅ Extrai campos de forma segura
+        
+        # CORREÇÃO: Garante que 'analise' é um dicionário e usa o fallback 'or {}' para 
+        # tratar o caso onde analise.get("cfop_info") retorna None.
+        analise_safe = analise if isinstance(analise, dict) else {}
+
+        cfop_info = analise_safe.get("cfop_info") or {}
+        ncm_info = analise_safe.get("ncm_info") or {}
 
         item.update({
             "cfop_desc": cfop_info.get("descricao"),
