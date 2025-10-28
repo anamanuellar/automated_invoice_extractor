@@ -7,6 +7,7 @@ import pdfplumber
 import pandas as pd
 from PIL import Image, ImageEnhance, ImageOps
 import fitz # PyMuPDF
+from codigos_fiscais import analisar_nf
 
 # =============== CONFIG (MANTIDO) ===============
 DEBUG = True
@@ -124,6 +125,65 @@ def consulta_cnpj_api(cnpj: str) -> Optional[str]:
     CNPJ_CACHE[cnpj_digits] = None
     return None
 
+def detectar_regime_tributario(dest_doc: Optional[str], emitente_doc: Optional[str] = None) -> str:
+    """
+    Detecta automaticamente o regime tributário (simples ou normal) com base no CNPJ do destinatário.
+    Fallback: usa o CNPJ do emitente se o destinatário não estiver disponível.
+    Retorna:
+      - 'simples' → Optante pelo Simples Nacional
+      - 'normal'  → Lucro Real ou Presumido
+    """
+    def consultar(cnpj: str) -> Optional[str]:
+        cnpj_digits = somente_digitos(cnpj)
+        if not cnpj_digits or len(cnpj_digits) != 14:
+            return None
+
+        # ✅ Verifica cache para evitar consultas repetidas
+        if cnpj_digits in CNPJ_CACHE and CNPJ_CACHE[cnpj_digits]:
+            return CNPJ_CACHE[cnpj_digits]
+
+        url = f"https://www.receitaws.com.br/v1/cnpj/{cnpj_digits}"
+        try:
+            response = requests.get(url, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                if isinstance(data, dict):
+                    optante = data.get("opcao_pelo_simples") or data.get("simples")
+                    situacao = data.get("situacao_especial", "")
+
+                    # 🔍 Verifica se é Simples Nacional
+                    if isinstance(optante, str) and "sim" in optante.lower():
+                        CNPJ_CACHE[cnpj_digits] = "simples"
+                        return "simples"
+                    if "SIMPLES" in str(situacao).upper():
+                        CNPJ_CACHE[cnpj_digits] = "simples"
+                        return "simples"
+
+                    # Caso não se enquadre → grava e retorna normal
+                    CNPJ_CACHE[cnpj_digits] = "normal"
+                    return "normal"
+
+            elif response.status_code == 429 and DEBUG:
+                print("[DEBUG] Rate limit na ReceitaWS - fallback 'normal'")
+                CNPJ_CACHE[cnpj_digits] = "normal"
+
+        except Exception as e:
+            if DEBUG:
+                print(f"[DEBUG] Erro ao detectar regime tributário para {cnpj}: {e}")
+
+        return None
+
+
+    # 1️⃣ Tenta primeiro o destinatário
+    regime = consultar(dest_doc) if dest_doc else None
+
+    # 2️⃣ Fallback: tenta o emitente
+    if not regime and emitente_doc:
+        regime = consultar(emitente_doc)
+
+    # 3️⃣ Se nada encontrado → assume normal
+    return regime or "normal"
+
 # ==================== NOVA FUNÇÃO: EXTRAÇÃO DE ITENS ====================
 
 def extrair_itens_da_tabela(pdf_page) -> List[Dict[str, Any]]:
@@ -226,6 +286,28 @@ def extrair_itens_da_tabela(pdf_page) -> List[Dict[str, Any]]:
             print(f"[DEBUG] Erro na extração híbrida de itens: {e}")
         return []
 
+def enriquecer_itens(itens, uf_destino="BA", regime="simples"):
+    """Usa a biblioteca de códigos fiscais para enriquecer os dados dos itens"""
+    itens_enriquecidos = []
+    for item in itens:
+        cfop = str(item.get("cfop", "")).strip()
+        ncm = str(item.get("ncm", "")).strip()
+        csosn = str(item.get("csosn", item.get("ocst", ""))).strip()
+
+        if cfop or ncm:
+            analise = analisar_nf(cfop, ncm, csosn, uf_destino, regime)
+            item.update({
+                "cfop_desc": analise.get("cfop_info", {}).get("descricao"),
+                "ncm_desc": analise.get("ncm_info", {}).get("descricao"),
+                "icms_aplica": analise.get("cfop_info", {}).get("icms_aplica"),
+                "ipi_aplica": analise.get("cfop_info", {}).get("ipi_aplica"),
+                "aliquota_icms": analise.get("aliquota_icms"),
+                "aliquota_ipi": analise.get("aliquota_ipi"),
+                "aliquota_pis": analise.get("aliquota_pis"),
+                "aliquota_cofins": analise.get("aliquota_cofins"),
+            })
+        itens_enriquecidos.append(item)
+    return itens_enriquecidos
 
 # ==================== FUNÇÕES DE EXTRAÇÃO (ADAPTADAS) ====================
 
@@ -386,77 +468,83 @@ def extrair_texto_ocr(arquivo_pdf, progress_callback=None):
 
 # FUNÇÃO PRINCIPAL ADAPTADA para retornar ITENS
 
-
 def extrair_capa_de_pdf(arquivo_pdf: str, progress_callback=None) -> dict:
     nome_arquivo = Path(arquivo_pdf).name
-    # Inicializa a lista de itens fora do try/except
-    itens: List[Dict[str, Any]] = [] 
+    itens: List[Dict[str, Any]] = []
     dados = {}
-    
-    # 1. Tentativa com pdfplumber (melhor para tabelas e texto nativo)
+
     try:
         with pdfplumber.open(arquivo_pdf) as pdf:
             capa_encontrada = False
-            
-            # Itera sobre todas as páginas para garantir que pegamos todos os itens
+
             for page in pdf.pages:
-                
-                # Extrai itens da tabela em cada página (Função extrair_itens_da_tabela deve estar atualizada e aprimorada!)
+                # === 1️⃣ Extrai itens estruturados da página ===
                 try:
-                    itens.extend(extrair_itens_da_tabela(page))
+                    pagina_itens = extrair_itens_da_tabela(page)
+                    if pagina_itens:
+                        itens.extend(pagina_itens)
                 except Exception as e:
                     if DEBUG:
                         print(f"[DEBUG] Falha ao extrair itens da Pág {page.page_number} de {nome_arquivo}: {e}")
-                
-                # Tenta extrair a capa (geralmente na Pág 1)
+
+                # === 2️⃣ Extrai capa (geralmente na primeira página) ===
                 if not capa_encontrada:
                     txt = page.extract_text() or ""
                     if txt and len(txt.strip()) > 100:
                         dados_capa = extrair_capa_de_texto(txt)
-                        # Só consideramos a capa encontrada se tiver pelo menos o número da NF
-                        if dados_capa.get("numero_nf"): 
+                        if dados_capa.get("numero_nf"):
                             dados = dados_capa
                             capa_encontrada = True
 
-            # Retorna o resultado do pdfplumber se algo útil foi encontrado
+            # === Detecta regime tributário automaticamente ===
+            regime_tributario = detectar_regime_tributario(
+                dest_doc=dados.get("dest_doc"),
+                emitente_doc=dados.get("emitente_doc")
+            )
+
+
+            # === 3️⃣ Enriquecimento fiscal automático (usa codigos_fiscais.py) ===
+            if itens:
+                itens = enriquecer_itens(itens, uf_destino="BA", regime=regime_tributario)
+                dados["regime_tributario"] = regime_tributario
+
+
+            # === 4️⃣ Retorna resultado consolidado ===
             if capa_encontrada or itens:
                 if progress_callback:
                     status = "✅" if capa_encontrada else "⚠️"
                     progress_callback(f"{status} pdfplumber: {nome_arquivo} ({len(itens)} itens encontrados)")
-                # A chave "itens_nf" é sempre incluída
                 return {"arquivo": nome_arquivo, **dados, "itens_nf": itens}
-                
+
     except Exception as e:
         if DEBUG:
             print(f"[DEBUG] Erro catastrófico em pdfplumber para {nome_arquivo}: {e}")
-        pass # Segue para OCR
+        pass  # Fallback para OCR
 
-    # 2. Tentativa com OCR (para PDFs escaneados - Não extrai itens estruturados)
+    # === 5️⃣ Fallback: OCR para PDFs escaneados (sem itens) ===
     try:
         if progress_callback:
             progress_callback(f"🔄 OCR: {nome_arquivo}")
-        
+
         texto_ocr = extrair_texto_ocr(arquivo_pdf, progress_callback)
         if texto_ocr and len(texto_ocr.strip()) > 100:
             dados = extrair_capa_de_texto(texto_ocr)
-            
             if any([dados.get("numero_nf"), dados.get("emitente_doc"), dados.get("valor_total")]):
                 if progress_callback:
                     progress_callback(f"✅ OCR: {nome_arquivo}")
-                # Quando usa OCR, assumimos que itens não foram extraídos (retorna lista vazia)
                 return {"arquivo": nome_arquivo, **dados, "itens_nf": []}
-                
+
     except Exception as e:
         if progress_callback:
             progress_callback(f"❌ Erro OCR/Extração: {e}")
 
-    # 3. Retorno vazio
+    # === 6️⃣ Retorno vazio padrão ===
     vazio = {k: None for k in [
-        "numero_nf","serie","emitente_doc","emitente_nome",
-        "dest_doc","dest_nome","data_emissao","valor_total","valor_total_num"
+        "numero_nf", "serie", "emitente_doc", "emitente_nome",
+        "dest_doc", "dest_nome", "data_emissao", "valor_total", "valor_total_num"
     ]}
-    # Sempre inclui a chave 'itens_nf'
     return {"arquivo": nome_arquivo, **vazio, "itens_nf": []}
+
 
 # =============== FUNÇÕES DE PROCESSAMENTO (ADAPTADAS) ===============
 
@@ -494,6 +582,8 @@ def processar_pdfs(arquivos_pdf: list, progress_callback=None) -> pd.DataFrame:
     # =================================================================
     
     return df
+
+
 
 
 def exportar_para_excel(df: pd.DataFrame) -> bytes:
