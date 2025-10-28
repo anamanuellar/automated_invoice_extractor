@@ -119,40 +119,14 @@ def consulta_nome_por_cnpj(cnpj_raw: str, usar_raiz=True) -> str | None:
     return None
 
 
-def extrair_emitente_do_filename(nome_arquivo: str) -> tuple[str | None, str | None]:
-    """Extrai nome do emitente do nome do arquivo"""
-    # Remove extensão
-    nome = nome_arquivo.replace('.pdf', '')
+def extrair_capa_de_texto(texto: str) -> dict:
+    """Extrai dados da capa com reconhecimento de seções"""
     
-    # Padrão: "DANFE <NOME> - Nº <NUM>" ou "DANFE Nº <NUM> - <NOME>"
-    # Extrai tudo entre "DANFE" e "- nº" ou "- Nº"
-    
-    m = re.search(r"DANFE\s+(?:nº|Nº)?\s*(\d+)?\s*-?\s*(.+?)(?:\s*-\s*nº|\s*-\s*Nº|\s*-\s*–)?\s*\d*$", nome, re.I)
-    if m and m.lastindex and m.lastindex >= 2:
-        emitente = m.group(2).strip()
-        if emitente:
-            return emitente, None
-    
-    # Padrão alternativo: "NF <NOME> - Nº <NUM>"
-    m = re.search(r"NF\s+(.+?)\s*-\s*Nº\s*\d+", nome, re.I)
-    if m:
-        emitente = m.group(1).strip()
-        if emitente:
-            return emitente, None
-    
-    return None, None
-
-
-def extrair_capa_de_texto(texto: str) -> dict[str, Any]:
-    """Extrai dados usando regex robustos (inspirado em parse_danfe_text)"""
-    
+    # Se detectar rotação, inverter TODO o texto ANTES de dividir
     if detectar_rotacao(texto):
         if DEBUG:
             print("  🔄 Rotação detectada, invertendo texto...")
-        texto = texto[::-1]
-    
-    # Normalizar: remover acentos e múltiplos espaços
-    texto_norm = re.sub(r"\s+", " ", texto)
+        texto = texto[::-1]  # Inverter string inteira
     
     numero_nf: str | None = None
     serie: str | None = None
@@ -163,54 +137,117 @@ def extrair_capa_de_texto(texto: str) -> dict[str, Any]:
     data_emissao: str | None = None
     valor_total: str | None = None
 
-    # ========== NF e Série ==========
-    m = re.search(r"N[oº]?\s*:?\s*(\d+)\s+S[ée]rie\s*:?\s*(\d+)", texto_norm, re.I)
-    if m:
-        numero_nf = m.group(1)
-        serie = m.group(2)
-        if DEBUG:
-            print(f"    ✓ NF: {numero_nf}, Série: {serie}")
+    linhas = texto.split("\n")
+
+    # ========== PASSO 1: Procurar campos diretos nos primeiros 50 linhas ==========
+    primeiras_linhas = "\n".join(linhas[:50])
     
-    # ========== Data ==========
-    m = re.search(r"Emiss[ãa]o[^0-9]*(\d{2}/\d{2}/\d{4})", texto_norm, re.I)
+    # Número da NF
+    m = re.search(r"N[°ºO]\.?\s*[:\-]?\s*(\d{1,3}\.\d{1,3}\.\d{3,6})", primeiras_linhas)
+    if m:
+        cand = m.group(1).replace(".", "")
+        numero_nf = str(int(cand))
+        if DEBUG:
+            print(f"    ✓ NF: {numero_nf}")
+    
+    # Série
+    m = re.search(r"S[ÉE]RIE\s*[:\-]?\s*(\d+)", primeiras_linhas, re.I)
+    if m:
+        serie = m.group(1)
+        if DEBUG:
+            print(f"    ✓ Série: {serie}")
+    
+    # Data
+    m = re.search(r"(?:Emiss[ãa]o|Data)\s*[:\-]?\s*(\d{2}/\d{2}/\d{4})", primeiras_linhas, re.I)
     if m:
         data_emissao = m.group(1)
-        if DEBUG:
-            print(f"    ✓ Data: {data_emissao}")
+    else:
+        m = RE_DATA.search(primeiras_linhas)
+        if m:
+            data_emissao = m.group(0)
     
-    # ========== Valor Total ==========
-    m = re.search(r"Valor\s+Total(?:\s+da\s+Nota)?\s*[:\-]?\s*R\$?\s*(\d{1,3}(?:\.\d{3})*,\d{2})", texto_norm, re.I)
+    if DEBUG and data_emissao:
+        print(f"    ✓ Data: {data_emissao}")
+    
+    # Valor
+    m = re.search(r"Valor\s+Total\s*[:\-]?\s*R\$?\s*(\d{1,3}(?:\.\d{3})*,\d{2})", primeiras_linhas, re.I)
+    if not m:
+        m = re.search(r"Total\s*[:\-]?\s*R\$?\s*(\d{1,3}(?:\.\d{3})*,\d{2})", primeiras_linhas, re.I)
     if m:
         valor_total = m.group(1)
         if DEBUG:
             print(f"    ✓ Valor: {valor_total}")
     
-    # ========== Emitente Nome ==========
-    m = re.search(r"(?:Emitente|Remetente)\s*[:\-]?\s*([^\n]{5,80}?)(?:\n|$)", texto_norm, re.I)
+    # Destinatário
+    m = re.search(r"Destinat[áa]rio\s*[:\-]?\s*([A-Z][A-Z0-9 \.,]+?)(?:\n|$)", primeiras_linhas, re.I)
     if m:
-        emitente_nome = m.group(1).strip()
-        if DEBUG and emitente_nome:
-            print(f"    ✓ Nome Emit: {emitente_nome[:50]}")
-    
-    # ========== CNPJ/CPF (prioriza emitente depois destinatário) ==========
-    docs = re.findall(r"(?:CNPJ|CPF)[^0-9]*([0-9\.\-/]{11,18})", texto_norm, re.I)
-    docs_limpos = [somente_digitos(d) for d in docs]
-    
-    if docs_limpos:
-        emitente_doc = docs_limpos[0]
-        if len(docs_limpos) > 1:
-            dest_doc = docs_limpos[1]
-        if DEBUG and emitente_doc:
-            print(f"    ✓ CNPJ Emit: {emitente_doc}")
-        if DEBUG and dest_doc:
-            print(f"    ✓ CNPJ Dest: {dest_doc}")
-    
-    # ========== Destinatário Nome ==========
-    m = re.search(r"(?:Destinat[aá]rio|Consumidor)\s*[:\-]?\s*([^\n]{3,80}?)(?:\n|$)", texto_norm, re.I)
-    if m:
-        dest_nome = m.group(1).strip()
-        if DEBUG and dest_nome:
-            print(f"    ✓ Nome Dest: {dest_nome[:50]}")
+        dest_cand = m.group(1).strip()
+        if len(dest_cand) > 3 and "DANFE" not in dest_cand.upper():
+            dest_nome = dest_cand
+            if DEBUG:
+                if dest_nome:
+                    print(f"    ✓ Dest: {dest_nome[:40]}")
+
+    # ========== PASSO 2: EMITENTE ==========
+    for i, ln in enumerate(linhas):
+        if "IDENTIFICAÇÃO DO EMITENTE" in ln.upper():
+            for j in range(i + 1, min(i + 12, len(linhas))):
+                linha = linhas[j].strip()
+                if not linha:
+                    continue
+                linha_up = linha.upper()
+                
+                if any(x in linha_up for x in ["DANFE", "DOCUMENTO", "NOTA", "ELETRÔNICA", "ENTRADA", "SAÍDA"]):
+                    continue
+                
+                doc = achar_doc_em_linha(linha)
+                if doc and len(somente_digitos(doc)) == 14:
+                    emitente_doc = doc
+                    if DEBUG:
+                        print(f"    ✓ CNPJ Emit: {emitente_doc}")
+                    break
+                
+                if len(linha) > 5 and not emitente_nome:
+                    if "CEP" not in linha_up and "FONE" not in linha_up:
+                        emitente_nome = linha
+                        if DEBUG:
+                            print(f"    ✓ Nome Emit: {emitente_nome[:40]}")
+            break
+
+    # ========== PASSO 3: DESTINATÁRIO ==========
+    if not dest_doc:
+        for i, ln in enumerate(linhas):
+            if "DESTINATÁRIO" in ln.upper() or "REMETENTE" in ln.upper():
+                for j in range(i + 1, min(i + 8, len(linhas))):
+                    linha = linhas[j].strip()
+                    if not linha:
+                        continue
+                    linha_up = linha.upper()
+                    
+                    doc = achar_doc_em_linha(linha)
+                    if doc and len(somente_digitos(doc)) == 14:
+                        dest_doc = doc
+                        if DEBUG:
+                            print(f"    ✓ CNPJ Dest: {dest_doc}")
+                        if doc in linha:
+                            nome_cand = linha.split(doc)[0].strip()
+                            if nome_cand and len(nome_cand) > 3:
+                                dest_nome = nome_cand
+                        break
+                    
+                    if "RAZÃO" not in linha_up and "CNPJ" not in linha_up and len(linha) > 5:
+                        if "RUA" not in linha_up and "ENDERECO" not in linha_up:
+                            dest_nome = linha
+                break
+
+    # ========== PASSO 4: VALOR TOTAL (fallback) ==========
+    if not valor_total:
+        for i, ln in enumerate(linhas):
+            if "VALOR TOTAL DA NOTA" in ln.upper():
+                v = pick_last_money_on_same_or_next_lines(linhas, i, 2)
+                if v:
+                    valor_total = v
+                    break
 
     resultado = cast(dict[str, Any], {
         "numero_nf": numero_nf,
@@ -258,16 +295,16 @@ def enriquecer_com_cnpj(df: pd.DataFrame, progress_callback=None) -> pd.DataFram
     """Enriquece dados com nomes dos CNPJs"""
     for idx in df.index:
         em_doc = df.loc[idx, "emitente_doc"]
-        if em_doc and isinstance(em_doc, str) and not df.loc[idx, "emitente_nome"]:
-            nome_cnpj = consulta_nome_por_cnpj(em_doc, usar_raiz=True)
+        if em_doc and not df.loc[idx, "emitente_nome"]:
+            nome_cnpj = consulta_nome_por_cnpj(str(em_doc), usar_raiz=True)
             if nome_cnpj:
                 if progress_callback:
                     progress_callback(f"✓ Emit: {nome_cnpj}")
                 df.loc[idx, "emitente_nome"] = nome_cnpj
 
         de_doc = df.loc[idx, "dest_doc"]
-        if de_doc and isinstance(de_doc, str) and not df.loc[idx, "dest_nome"]:
-            nome_cnpj = consulta_nome_por_cnpj(de_doc, usar_raiz=True)
+        if de_doc and not df.loc[idx, "dest_nome"]:
+            nome_cnpj = consulta_nome_por_cnpj(str(de_doc), usar_raiz=True)
             if nome_cnpj:
                 if progress_callback:
                     progress_callback(f"✓ Dest: {nome_cnpj}")
