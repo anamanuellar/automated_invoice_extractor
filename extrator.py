@@ -215,30 +215,32 @@ def extrair_capa_de_texto(texto: str) -> dict:
     for i, ln in enumerate(linhas):
         if "IDENTIFICAÇÃO DO EMITENTE" in ln.upper():
             # Próximas linhas contêm nome e CNPJ do emitente
-            for j in range(i + 1, min(i + 15, len(linhas))):
+            cnpj_encontrado = False
+            for j in range(i + 1, min(i + 20, len(linhas))):
                 linha = linhas[j].strip()
                 if not linha:
                     continue
                 linha_up = linha.upper()
                 
-                # Pular linhas que não são dados do emitente
-                if any(x in linha_up for x in ["DANFE", "DOCUMENTO", "NOTA", "ELETRÔNICA", "ENTRADA", "SAÍDA", "---", "CHAVE"]):
+                # Parar se encontrou seção de destinatário ou DANFE
+                if "DESTINATÁRIO" in linha_up or "REMETENTE" in linha_up or "NATUREZA DA OPERAÇÃO" in linha_up:
                     break
                 
-                # Procurar CNPJ/CPF
-                doc = achar_doc_em_linha(linha)
-                if doc and len(somente_digitos(doc)) == 14:
-                    emitente_doc = doc
-                    if DEBUG:
-                        print(f"    ✓ CNPJ Emit: {emitente_doc}")
-                    break
-                
-                # Primeira linha não-vazia é o nome (e não contém caracteres de endereço)
-                if len(linha) > 5 and not emitente_nome:
-                    if not any(x in linha_up for x in ["CEP:", "FONE:", "RUA", "AV", "AVENIDA", "TRAVESSA", "ESTRADA"]):
+                # Pegar nome do emitente (primeira linha com texto significativo)
+                if not emitente_nome and len(linha) > 5:
+                    if not any(x in linha_up for x in ["DANFE", "DOCUMENTO", "ELETRÔNICA", "ENTRADA", "SAÍDA", "---", "CHAVE", "CEP:", "FONE:", "RUA", "AV", "AVENIDA", "TRAVESSA", "ESTRADA"]):
                         emitente_nome = linha
                         if DEBUG:
                             print(f"    ✓ Nome Emit: {emitente_nome[:50]}")
+                
+                # Pegar CNPJ do emitente (linha com CNPJ formatado XX.XXX.XXX/XXXX-XX)
+                if not cnpj_encontrado:
+                    doc = achar_doc_em_linha(linha)
+                    if doc and len(somente_digitos(doc)) == 14:
+                        emitente_doc = doc
+                        cnpj_encontrado = True
+                        if DEBUG:
+                            print(f"    ✓ CNPJ Emit: {emitente_doc}")
             break
 
     # ========== PASSO 3: DESTINATÁRIO ==========
