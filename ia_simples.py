@@ -399,27 +399,36 @@ def add_ia_to_streamlit(df: pd.DataFrame) -> None:
                 valores = valores_limpos['valor_total_num'].tolist()
                 resultado = detect_anomalies(valores)
                 
-                anomalias_df = pd.DataFrame(resultado.get('anomalias', [])).rename(columns={'valor': 'Valor Total (R$)'})
+                # DataFrame inicial de anomalias
+                anomalias_df = pd.DataFrame(resultado.get('anomalias', []))
                 
                 if not anomalias_df.empty:
-                    # Adicionar detalhes da NF que é anômala
-                # 1. Pega os índices posicionais das anomalias
+                    
+                    # 1. Pega os índices posicionais das anomalias
                     indices_posicionais = anomalias_df['indice'].to_numpy()
                     
                     # 2. Pega os índices reais do DataFrame limpo e usa np.take para selecionar
-                    #    apenas os índices que correspondem às anomalias (indices_posicionais)
                     indices_reais = valores_limpos.index.to_numpy().take(indices_posicionais)
                     
                     # 3. Atribui o índice real de volta ao DataFrame de anomalias
-                    anomalias_df['índice_original'] = indices_reais
+                    anomalias_df['índice_original'] = indices_reais # <--- AGORA A COLUNA EXISTE AQUI
                     
-                    # ====================================================================
+                    # 4. Faz o merge com o DF original
+                    anomalias_finais = df_anomalia.loc[anomalias_df['índice_original'], 
+                                                      ['data_emissao', 'emitente_nome', 'numero_nf', 'valor_total_num']]
                     
-                    anomalias_finais = df_anomalia.loc[anomalias_df['índice_original'], ['data_emissao', 'emitente_nome', 'numero_nf', 'valor_total_num']]
-                    anomalias_finais = anomalias_finais.merge(anomalias_df[['índice_original', 'desvio_percentual']], on='índice_original', how='left')
+                    # 5. Adiciona o desvio percentual
+                    anomalias_finais = anomalias_finais.merge(
+                        anomalias_df[['índice_original', 'desvio_percentual']], 
+                        left_index=True, 
+                        right_on='índice_original', 
+                        how='left'
+                    )
                     
                     st.warning(f"Foram detectadas **{len(anomalias_finais)}** anomalias no *Total Geral*:")
-                    st.dataframe(anomalias_finais.rename(columns={'valor_total_num': 'Valor Anômalo (R$)', 'desvio_percentual': 'Desvio (%)'}).drop(columns='índice_original'), use_container_width=True)
+                    st.dataframe(anomalias_finais.rename(columns={'valor_total_num': 'Valor Anômalo (R$)', 
+                                                                  'desvio_percentual': 'Desvio (%)'}).drop(columns='índice_original', errors='ignore'), 
+                                use_container_width=True)
                 else:
                     st.success("✅ Nenhuma anomalia significativa detectada no Total Geral.")
 
