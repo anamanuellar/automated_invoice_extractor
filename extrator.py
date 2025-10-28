@@ -9,7 +9,7 @@ from PIL import Image, ImageEnhance, ImageOps
 import fitz # PyMuPDF
 
 # =============== CONFIG (MANTIDO) ===============
-DEBUG = False
+DEBUG = True
 CNPJ_CACHE: dict[str, Optional[str]] = {}
 EASY_OCR = None # Inicializar a variável global para evitar erros
 
