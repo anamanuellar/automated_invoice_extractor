@@ -9,7 +9,7 @@ from PIL import Image, ImageEnhance, ImageOps
 import fitz # PyMuPDF
 from codigos_fiscais import analisar_nf
 from codigos_fiscais_destinatario import analisar_nf_como_destinatario, gerar_resumo_analise
-
+import json
 
 # ==================== CACHE HÍBRIDO (DISCO + MEMÓRIA + STREAMLIT) ====================
 
@@ -123,48 +123,108 @@ def pick_last_money_on_same_or_next_lines(linhas, idx, max_ahead=6):
   return None
 
 # Consulta API para enriquecer nome emitente a partir do CNPJ (Corrigida)
-def consulta_cnpj_api(cnpj: str) -> Optional[str]:
-    cnpj_digits = somente_digitos(cnpj)
-    if cnpj_digits in CNPJ_CACHE:
-        return CNPJ_CACHE[cnpj_digits]
-    
-    time.sleep(0.5) 
 
-    url = f"https://www.receitaws.com.br/v1/cnpj/{cnpj_digits}"
-    try:
-        response = requests.get(url, timeout=10)
-        
-        if response.status_code == 200:
-            data = response.json()
-            if isinstance(data, dict) and data.get("status") == "OK":
-                nome_empresarial = data.get("nome")
-                CNPJ_CACHE[cnpj_digits] = nome_empresarial
-                return nome_empresarial
-            elif isinstance(data, dict) and data.get("status") == "ERROR":
-                if DEBUG:
-                    print(f"[DEBUG] Erro da API na consulta do CNPJ {cnpj}: {data.get('message')}")
-                return None
-        elif response.status_code == 429: # Rate limit
+# ==================== CACHE PERSISTENTE DE CNPJ ====================
+
+CACHE_CNPJ_FILE = "cache_cnpj.json"
+CNPJ_CACHE: dict[str, Optional[str]] = {}
+
+def carregar_cache_cnpj():
+    """Carrega cache persistente de CNPJs se existir."""
+    global CNPJ_CACHE
+    if os.path.exists(CACHE_CNPJ_FILE):
+        try:
+            with open(CACHE_CNPJ_FILE, "r", encoding="utf-8") as f:
+                CNPJ_CACHE = json.load(f)
             if DEBUG:
-                print(f"[DEBUG] Rate Limit (429) para o CNPJ {cnpj}. Tentando novamente em 5 segundos.")
-            time.sleep(5)
-            return consulta_cnpj_api(cnpj)
-        
-        if DEBUG:
-            print(f"[DEBUG] Erro HTTP {response.status_code} na consulta do CNPJ {cnpj}")
-        
-    except requests.exceptions.Timeout:
-        if DEBUG:
-            print(f"[DEBUG] Timeout na consulta do CNPJ {cnpj}")
-    except requests.exceptions.RequestException as e:
-        if DEBUG:
-            print(f"[DEBUG] Erro de requisição na consulta do CNPJ {cnpj}: {e}")
+                print(f"[DEBUG] Cache CNPJ carregado: {len(CNPJ_CACHE)} registros")
+        except Exception as e:
+            if DEBUG:
+                print(f"[DEBUG] Falha ao carregar cache CNPJ: {e}")
+            CNPJ_CACHE = {}
+
+def salvar_cache_cnpj():
+    """Salva cache persistente de CNPJs."""
+    try:
+        with open(CACHE_CNPJ_FILE, "w", encoding="utf-8") as f:
+            json.dump(CNPJ_CACHE, f, ensure_ascii=False, indent=2)
     except Exception as e:
         if DEBUG:
-            print(f"[DEBUG] Erro inesperado na consulta do CNPJ {cnpj}: {e}")
-            
-    CNPJ_CACHE[cnpj_digits] = None
-    return None
+            print(f"[DEBUG] Falha ao salvar cache CNPJ: {e}")
+
+# ==================== CONSULTA COM FALLBACK E CACHE ====================
+
+def consulta_cnpj_api(cnpj: str) -> Optional[str]:
+    """
+    Consulta nome empresarial do CNPJ usando ReceitaWS e BrasilAPI como fallback.
+    Implementa cache persistente e limite de tentativas para evitar loop infinito.
+    """
+    cnpj_digits = somente_digitos(cnpj)
+    if len(cnpj_digits) != 14:
+        return None
+
+    # ✅ Verifica cache primeiro
+    if cnpj_digits in CNPJ_CACHE:
+        if DEBUG:
+            print(f"[DEBUG] Cache hit para {cnpj_digits}")
+        return CNPJ_CACHE[cnpj_digits]
+
+    tentativas = 0
+    nome_empresarial = None
+
+    # === 1️⃣ Primeira tentativa: ReceitaWS ===
+    while tentativas < 3:
+        tentativas += 1
+        url = f"https://www.receitaws.com.br/v1/cnpj/{cnpj_digits}"
+        try:
+            response = requests.get(url, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                if isinstance(data, dict) and data.get("status") == "OK":
+                    nome_empresarial = data.get("nome")
+                    break
+                elif data.get("status") == "ERROR":
+                    if DEBUG:
+                        print(f"[DEBUG] ReceitaWS erro: {data.get('message')}")
+                    break
+            elif response.status_code == 429:
+                if DEBUG:
+                    print(f"[DEBUG] Rate Limit (429) ReceitaWS → tentativa {tentativas}/3")
+                time.sleep(10)
+                continue
+            else:
+                if DEBUG:
+                    print(f"[DEBUG] HTTP {response.status_code} ReceitaWS → tentativa {tentativas}/3")
+                break
+        except Exception as e:
+            if DEBUG:
+                print(f"[DEBUG] Erro ReceitaWS tentativa {tentativas}: {e}")
+            time.sleep(2)
+
+    # === 2️⃣ Fallback: BrasilAPI (se ReceitaWS falhou) ===
+    if not nome_empresarial:
+        try:
+            url_brasil = f"https://brasilapi.com.br/api/cnpj/v1/{cnpj_digits}"
+            resp = requests.get(url_brasil, timeout=10)
+            if resp.status_code == 200:
+                data_brasil = resp.json()
+                nome_empresarial = data_brasil.get("razao_social") or data_brasil.get("nome_fantasia")
+                if DEBUG:
+                    print(f"[DEBUG] Fallback BrasilAPI OK → {nome_empresarial}")
+            else:
+                if DEBUG:
+                    print(f"[DEBUG] BrasilAPI retornou {resp.status_code}")
+        except Exception as e:
+            if DEBUG:
+                print(f"[DEBUG] Fallback BrasilAPI falhou: {e}")
+
+    # === 3️⃣ Atualiza cache (mesmo que None, para evitar repetir falhas) ===
+    CNPJ_CACHE[cnpj_digits] = nome_empresarial
+    salvar_cache_cnpj()
+
+    return nome_empresarial
+
+
 
 def detectar_regime_tributario(dest_doc: Optional[str], emitente_doc: Optional[str] = None) -> str:
     """
@@ -532,10 +592,11 @@ def extrair_capa_de_pdf(arquivo_pdf: str, progress_callback=None) -> dict:
                 if not capa_encontrada:
                     txt = page.extract_text() or ""
                     if txt and len(txt.strip()) > 100:
-                        dados_capa = extrair_capa_de_texto(txt)
-                        if dados_capa.get("numero_nf"):
+                        dados_capa = extrair_capa_de_texto(txt) or {}
+                        if dados_capa and dados_capa.get("numero_nf"):
                             dados = dados_capa
                             capa_encontrada = True
+
 
             # === 3️⃣ Detecta automaticamente os regimes tributários ===
             regime_dest = detectar_regime_tributario(dest_doc=dados.get("dest_doc"), emitente_doc=None)
@@ -624,6 +685,8 @@ def processar_pdfs(arquivos_pdf: list, _progress_callback=None) -> pd.DataFrame:
       - Disco cache (permanente)
       - Memória (em execução)
     """
+    carregar_cache_cnpj()
+
     regs = []
 
     for i, pdf_path in enumerate(arquivos_pdf, 1):
@@ -664,6 +727,8 @@ def processar_pdfs(arquivos_pdf: list, _progress_callback=None) -> pd.DataFrame:
         df["_ordem"] = pd.to_datetime(df["data_emissao"], format="%d/%m/%Y", errors="coerce")
         df = df.sort_values(by=["_ordem", "numero_nf"], ascending=[True, True])
         df = df.drop(columns=["_ordem"])
+
+    salvar_cache_cnpj()
 
     return df
 
