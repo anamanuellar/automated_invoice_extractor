@@ -140,9 +140,11 @@ class ExtractorNF:
                 
                 dados['numero_nf'] = self.numero_nf
                 dados['serie'] = self.serie
-                dados['cnpj_emitente'] = self._extrair_cnpj_emitente(linhas)
-                dados['cnpj_destinatario'] = self._extrair_cnpj_destinatario(linhas)
-                dados['valor_total'] = self._extrair_valor_total(linhas)
+                dados['emitente_nome'] = self._extrair_nome_emitente(linhas)
+                dados['emitente_doc'] = self._extrair_cnpj_emitente(linhas)
+                dados['dest_nome'] = self._extrair_nome_destinatario(linhas)
+                dados['dest_doc'] = self._extrair_cnpj_destinatario(linhas)
+                dados['valor_total_num'] = self._extrair_valor_total(linhas)
                 dados['data_emissao'] = self._extrair_data(linhas)
                 
         except Exception as e:
@@ -173,22 +175,56 @@ class ExtractorNF:
                 return m.group(1)
         return None
     
+    def _extrair_nome_emitente(self, linhas: list) -> Optional[str]:
+        """Extrai nome do emitente"""
+        for i, ln in enumerate(linhas):
+            if "EMITENTE" in ln.upper() or "FORNECEDOR" in ln.upper():
+                # Nome geralmente está na próxima linha após "EMITENTE"
+                if i + 1 < len(linhas):
+                    nome_linha = linhas[i + 1].strip()
+                    if nome_linha and nome_linha.upper() != "CNPJ" and len(nome_linha) > 3:
+                        return nome_linha
+                # Ou na mesma linha após "EMITENTE:"
+                parts = ln.split(':')
+                if len(parts) > 1:
+                    nome = parts[1].strip()
+                    if nome and len(nome) > 3:
+                        return nome
+        return None
+    
     def _extrair_cnpj_emitente(self, linhas: list) -> Optional[str]:
         """Extrai CNPJ do emitente"""
         for i, ln in enumerate(linhas):
             if "EMITENTE" in ln.upper() or "FORNECEDOR" in ln.upper():
-                # Procura nos próximos 3 linhas
-                for j in range(i+1, min(i+4, len(linhas))):
+                # Procura nos próximos 5 linhas
+                for j in range(i+1, min(i+6, len(linhas))):
                     m = re.search(r"(\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2})", linhas[j])
                     if m:
                         return m.group(1)
         return None
     
+    def _extrair_nome_destinatario(self, linhas: list) -> Optional[str]:
+        """Extrai nome do destinatário"""
+        for i, ln in enumerate(linhas):
+            if "DESTINAT" in ln.upper() or "CLIENTE" in ln.upper() or "PARA:" in ln.upper():
+                # Nome geralmente está na próxima linha após "DESTINATÁRIO"
+                if i + 1 < len(linhas):
+                    nome_linha = linhas[i + 1].strip()
+                    if nome_linha and nome_linha.upper() != "CNPJ" and len(nome_linha) > 3:
+                        return nome_linha
+                # Ou na mesma linha após "DESTINATÁRIO:"
+                parts = ln.split(':')
+                if len(parts) > 1:
+                    nome = parts[1].strip()
+                    if nome and len(nome) > 3:
+                        return nome
+        return None
+    
     def _extrair_cnpj_destinatario(self, linhas: list) -> Optional[str]:
         """Extrai CNPJ do destinatário"""
         for i, ln in enumerate(linhas):
-            if "DESTINAT" in ln.upper() or "CLIENTE" in ln.upper():
-                for j in range(i+1, min(i+4, len(linhas))):
+            if "DESTINAT" in ln.upper() or "CLIENTE" in ln.upper() or "PARA:" in ln.upper():
+                for j in range(i+1, min(i+6, len(linhas))):
                     m = re.search(r"(\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2})", linhas[j])
                     if m:
                         return m.group(1)
@@ -215,6 +251,22 @@ class ExtractorNF:
             if m:
                 return f"{m.group(1)}/{m.group(2)}/{m.group(3)}"
         return None
+
+
+def processar_pdfs(pdf_paths: list, progress_callback=None) -> pd.DataFrame:
+    """Processa múltiplos PDFs e retorna DataFrame"""
+    extrator = ExtractorNF()
+    resultados = []
+    
+    for i, pdf_path in enumerate(pdf_paths):
+        if progress_callback:
+            progress_callback(f"Processando: {pdf_path}")
+        
+        dados = extrator.extrair_de_pdf(pdf_path)
+        dados['arquivo'] = pdf_path
+        resultados.append(dados)
+    
+    return pd.DataFrame(resultados)
 
 
 # Exemplo de uso
