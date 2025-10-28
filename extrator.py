@@ -9,6 +9,45 @@ from PIL import Image, ImageEnhance, ImageOps
 import fitz # PyMuPDF
 from codigos_fiscais import analisar_nf
 
+# ==================== CACHE HÍBRIDO (DISCO + MEMÓRIA + STREAMLIT) ====================
+
+import hashlib, json, streamlit as st
+
+# Diretório para armazenar resultados já processados
+CACHE_DIR = "cache_nf"
+os.makedirs(CACHE_DIR, exist_ok=True)
+
+# Cache em memória para CNPJs e resultados de NF
+CNPJ_CACHE: dict[str, Optional[str]] = {}
+NF_MEM_CACHE: dict[str, dict] = {}
+
+def get_pdf_hash(pdf_path: str) -> str:
+    """Gera um hash MD5 único do conteúdo do PDF"""
+    with open(pdf_path, "rb") as f:
+        return hashlib.md5(f.read()).hexdigest()
+
+def carregar_cache_nf(hash_pdf: str) -> Optional[dict]:
+    """Tenta carregar o resultado do cache em disco"""
+    # 1️⃣ Cache em memória (mais rápido)
+    if hash_pdf in NF_MEM_CACHE:
+        return NF_MEM_CACHE[hash_pdf]
+
+    # 2️⃣ Cache em disco (persistente)
+    path = os.path.join(CACHE_DIR, f"{hash_pdf}.json")
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            NF_MEM_CACHE[hash_pdf] = data
+            return data
+    return None
+
+def salvar_cache_nf(hash_pdf: str, data: dict):
+    """Salva o resultado do processamento da NF no cache em disco e memória"""
+    NF_MEM_CACHE[hash_pdf] = data
+    path = os.path.join(CACHE_DIR, f"{hash_pdf}.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
 # =============== CONFIG (MANTIDO) ===============
 DEBUG = True
 CNPJ_CACHE: dict[str, Optional[str]] = {}
@@ -565,39 +604,55 @@ def extrair_capa_de_pdf(arquivo_pdf: str, progress_callback=None) -> dict:
 
 # =============== FUNÇÕES DE PROCESSAMENTO (ADAPTADAS) ===============
 
+@st.cache_data(show_spinner=False, ttl=86400)  # Cache Streamlit (24h)
 def processar_pdfs(arquivos_pdf: list, progress_callback=None) -> pd.DataFrame:
+    """
+    Processa múltiplos PDFs com cache híbrido:
+      - Streamlit cache (24h)
+      - Disco cache (permanente)
+      - Memória (em execução)
+    """
     regs = []
+
     for i, pdf_path in enumerate(arquivos_pdf, 1):
+        nome = Path(pdf_path).name
         if progress_callback:
-            progress_callback(f"[{i}/{len(arquivos_pdf)}] {Path(pdf_path).name}")
-        regs.append(extrair_capa_de_pdf(pdf_path, progress_callback))
-    
+            progress_callback(f"[{i}/{len(arquivos_pdf)}] {nome}")
+
+        # === 1️⃣ Gera hash e tenta carregar cache ===
+        hash_pdf = get_pdf_hash(pdf_path)
+        cached = carregar_cache_nf(hash_pdf)
+        if cached:
+            if progress_callback:
+                progress_callback(f"⚡ Loaded from cache: {nome}")
+            regs.append(cached)
+            continue
+
+        # === 2️⃣ Se não houver cache, processa normalmente ===
+        try:
+            data = extrair_capa_de_pdf(pdf_path, progress_callback)
+            regs.append(data)
+            salvar_cache_nf(hash_pdf, data)
+        except Exception as e:
+            if DEBUG:
+                print(f"[DEBUG] Falha ao processar {nome}: {e}")
+
+    # === 3️⃣ Gera DataFrame consolidado ===
     df = pd.DataFrame(regs).drop_duplicates(subset=["arquivo"], keep="first")
-    
-    # =================================================================
-    # CORREÇÃO CRÍTICA: Limpeza e Conversão de Tipos
-    # Garante que as colunas essenciais para o Pandas e IA estão corretas
-    # =================================================================
-    
-    # 1. Colunas de nome/texto: força string para evitar o erro .str
+
+    # === 4️⃣ Limpeza e padronização ===
     for col in ["emitente_nome", "dest_nome"]:
         if col in df.columns:
-            # Preenche NaNs com string vazia e depois converte tudo para string
             df[col] = df[col].fillna('').astype(str)
-            
-    # 2. Colunas numéricas: força float
+
     if "valor_total_num" in df.columns:
         df["valor_total_num"] = pd.to_numeric(df["valor_total_num"], errors="coerce")
-        
-    # 3. Colunas de data
+
     if "data_emissao" in df.columns:
-        # Tenta a conversão de data (necessário para ordenar)
         df["_ordem"] = pd.to_datetime(df["data_emissao"], format="%d/%m/%Y", errors="coerce")
         df = df.sort_values(by=["_ordem", "numero_nf"], ascending=[True, True])
         df = df.drop(columns=["_ordem"])
-        
-    # =================================================================
-    
+
     return df
 
 
