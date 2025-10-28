@@ -593,9 +593,10 @@ def extrair_capa_de_pdf(arquivo_pdf: str, progress_callback=None) -> dict:
                     txt = page.extract_text() or ""
                     if txt and len(txt.strip()) > 100:
                         dados_capa = extrair_capa_de_texto(txt) or {}
-                        if dados_capa and dados_capa.get("numero_nf"):
-                            dados = dados_capa
-                            capa_encontrada = True
+                        if isinstance(dados_capa, dict) and dados_capa.get("numero_nf"):
+                                dados = dados_capa
+                                capa_encontrada = True
+
 
 
             # === 3️⃣ Detecta automaticamente os regimes tributários ===
