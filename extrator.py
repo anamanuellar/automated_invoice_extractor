@@ -413,27 +413,35 @@ def classificar_contabilmente(cfop: str) -> str:
 def enriquecer_itens(itens, uf_destino="BA", regime="simples"):
     """Usa a biblioteca de códigos fiscais para enriquecer os dados dos itens"""
     itens_enriquecidos = []
+
     for item in itens:
         cfop = str(item.get("cfop", "")).strip()
         ncm = str(item.get("ncm", "")).strip()
         csosn = str(item.get("csosn", item.get("ocst", ""))).strip()
 
-        analise = None
-        if cfop or ncm:
+        # ✅ Tenta análise fiscal, mas garante retorno de dict
+        try:
             analise = analisar_nf(cfop, ncm, csosn, uf_destino, regime)
-            # ✅ Garante que analise seja um dicionário válido
             if not isinstance(analise, dict):
                 analise = {}
+        except Exception as e:
+            if DEBUG:
+                print(f"[DEBUG] Falha ao analisar NF item (CFOP={cfop}, NCM={ncm}): {e}")
+            analise = {}
+
+        # ✅ Extrai campos de forma segura
+        cfop_info = analise.get("cfop_info", {}) if isinstance(analise, dict) else {}
+        ncm_info = analise.get("ncm_info", {}) if isinstance(analise, dict) else {}
 
         item.update({
-            "cfop_desc": analise.get("cfop_info", {}).get("descricao") if analise else None,
-            "ncm_desc": analise.get("ncm_info", {}).get("descricao") if analise else None,
-            "icms_aplica": analise.get("cfop_info", {}).get("icms_aplica") if analise else None,
-            "ipi_aplica": analise.get("cfop_info", {}).get("ipi_aplica") if analise else None,
-            "aliquota_icms": analise.get("aliquota_icms") if analise else None,
-            "aliquota_ipi": analise.get("aliquota_ipi") if analise else None,
-            "aliquota_pis": analise.get("aliquota_pis") if analise else None,
-            "aliquota_cofins": analise.get("aliquota_cofins") if analise else None,
+            "cfop_desc": cfop_info.get("descricao"),
+            "ncm_desc": ncm_info.get("descricao"),
+            "icms_aplica": cfop_info.get("icms_aplica"),
+            "ipi_aplica": cfop_info.get("ipi_aplica"),
+            "aliquota_icms": analise.get("aliquota_icms") if isinstance(analise, dict) else None,
+            "aliquota_ipi": analise.get("aliquota_ipi") if isinstance(analise, dict) else None,
+            "aliquota_pis": analise.get("aliquota_pis") if isinstance(analise, dict) else None,
+            "aliquota_cofins": analise.get("aliquota_cofins") if isinstance(analise, dict) else None,
             # 🧾 Classificação contábil automática
             "classificacao_contabil": classificar_contabilmente(cfop),
         })
