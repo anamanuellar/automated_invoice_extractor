@@ -8,6 +8,8 @@ import pandas as pd
 from PIL import Image, ImageEnhance, ImageOps
 import fitz # PyMuPDF
 from codigos_fiscais import analisar_nf
+from codigos_fiscais_destinatario import analisar_nf_como_destinatario, gerar_resumo_analise
+
 
 # ==================== CACHE HÍBRIDO (DISCO + MEMÓRIA + STREAMLIT) ====================
 
@@ -536,16 +538,10 @@ def extrair_capa_de_pdf(arquivo_pdf: str, progress_callback=None) -> dict:
                             capa_encontrada = True
 
             # === 3️⃣ Detecta automaticamente os regimes tributários ===
-            regime_dest = detectar_regime_tributario(
-                dest_doc=dados.get("dest_doc"),
-                emitente_doc=None
-            )
-            regime_emit = detectar_regime_tributario(
-                dest_doc=dados.get("emitente_doc"),
-                emitente_doc=None
-            )
+            regime_dest = detectar_regime_tributario(dest_doc=dados.get("dest_doc"), emitente_doc=None)
+            regime_emit = detectar_regime_tributario(dest_doc=dados.get("emitente_doc"), emitente_doc=None)
 
-            # === 4️⃣ Define o regime final conforme a combinação ===
+            # === 4️⃣ Define o regime final conforme combinação ===
             if regime_dest == "normal" and regime_emit == "simples":
                 regime_final = "normal"
             elif regime_dest == "simples" and regime_emit == "normal":
@@ -553,19 +549,39 @@ def extrair_capa_de_pdf(arquivo_pdf: str, progress_callback=None) -> dict:
             else:
                 regime_final = regime_dest or regime_emit or "normal"
 
-            if DEBUG:
-                print(f"[DEBUG] Regimes detectados → Emitente: {regime_emit}, Destinatário: {regime_dest}, Final: {regime_final}")
-
-            # === 5️⃣ Enriquecimento fiscal automático (usa codigos_fiscais.py) ===
-            if itens:
-                itens = enriquecer_itens(itens, uf_destino="BA", regime=regime_final)
-
-            # Armazena as informações de regime no dicionário de retorno
             dados["regime_emit"] = regime_emit
             dados["regime_dest"] = regime_dest
             dados["regime_final"] = regime_final
 
-            # === 6️⃣ Retorna resultado consolidado ===
+            if DEBUG:
+                print(f"[DEBUG] Regimes detectados → Emitente: {regime_emit}, Destinatário: {regime_dest}, Final: {regime_final}")
+
+            # === 5️⃣ Enriquecimento fiscal por item ===
+            if itens:
+                itens = enriquecer_itens(itens, uf_destino="BA", regime=regime_final)
+
+            # === 6️⃣ Análise fiscal detalhada (destinatário) ===
+            try:
+                if itens:
+                    analise = analisar_nf_como_destinatario(
+                        cfop=str(itens[0].get("cfop", "")),
+                        ncm=str(itens[0].get("ncm", "")),
+                        csosn_ou_cst_recebido=str(itens[0].get("csosn", itens[0].get("ocst", ""))),
+                        regime_destinatario=regime_dest or "lucro_real",
+                        regime_emitente=regime_emit or "normal",
+                        uf_origem="BA",
+                        valor_total=dados.get("valor_total_num", 0.0),
+                        valor_icms=None,
+                        valor_pis=None,
+                        valor_cofins=None,
+                    )
+                    dados["analise_destinatario"] = analise
+                    dados["resumo_analise"] = gerar_resumo_analise(analise)
+            except Exception as e:
+                if DEBUG:
+                    print(f"[DEBUG] Erro ao analisar NF como destinatário: {e}")
+
+            # === 7️⃣ Retorna resultado consolidado ===
             if capa_encontrada or itens:
                 if progress_callback:
                     status = "✅" if capa_encontrada else "⚠️"
@@ -575,13 +591,11 @@ def extrair_capa_de_pdf(arquivo_pdf: str, progress_callback=None) -> dict:
     except Exception as e:
         if DEBUG:
             print(f"[DEBUG] Erro catastrófico em pdfplumber para {nome_arquivo}: {e}")
-        pass  # Fallback para OCR
 
-    # === 7️⃣ Fallback: OCR para PDFs escaneados (sem itens) ===
+    # === 8️⃣ Fallback OCR ===
     try:
         if progress_callback:
             progress_callback(f"🔄 OCR: {nome_arquivo}")
-
         texto_ocr = extrair_texto_ocr(arquivo_pdf, progress_callback)
         if texto_ocr and len(texto_ocr.strip()) > 100:
             dados = extrair_capa_de_texto(texto_ocr)
@@ -589,15 +603,13 @@ def extrair_capa_de_pdf(arquivo_pdf: str, progress_callback=None) -> dict:
                 if progress_callback:
                     progress_callback(f"✅ OCR: {nome_arquivo}")
                 return {"arquivo": nome_arquivo, **dados, "itens_nf": []}
-
     except Exception as e:
         if progress_callback:
             progress_callback(f"❌ Erro OCR/Extração: {e}")
 
-    # === 8️⃣ Retorno vazio padrão ===
     vazio = {k: None for k in [
-        "numero_nf", "serie", "emitente_doc", "emitente_nome",
-        "dest_doc", "dest_nome", "data_emissao", "valor_total", "valor_total_num"
+        "numero_nf","serie","emitente_doc","emitente_nome",
+        "dest_doc","dest_nome","data_emissao","valor_total","valor_total_num"
     ]}
     return {"arquivo": nome_arquivo, **vazio, "itens_nf": []}
 
@@ -667,15 +679,12 @@ def exportar_para_excel(df: pd.DataFrame) -> bytes:
     return output.getvalue()
 
 def exportar_para_excel_com_itens(df: pd.DataFrame) -> bytes:
-    """
-    Exporta as notas e os itens detalhados em abas separadas.
-    """
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         # Aba principal
         df.drop(columns=["itens_nf"], errors="ignore").to_excel(writer, sheet_name="Notas Fiscais", index=False)
 
-        # Aba de itens detalhados
+        # Aba de itens
         todas_linhas = []
         for _, row in df.iterrows():
             if isinstance(row.get("itens_nf"), list):
@@ -689,12 +698,31 @@ def exportar_para_excel_com_itens(df: pd.DataFrame) -> bytes:
                         "regime_emit": row.get("regime_emit"),
                         "regime_dest": row.get("regime_dest"),
                         "regime_final": row.get("regime_final"),
-
                         **item
                     })
         if todas_linhas:
             pd.DataFrame(todas_linhas).to_excel(writer, sheet_name="Itens Detalhados", index=False)
 
+        # Aba de análises fiscais
+        analises = []
+        for _, row in df.iterrows():
+            analise = row.get("analise_destinatario")
+            if isinstance(analise, dict):
+                analises.append({
+                    "arquivo": row["arquivo"],
+                    "numero_nf": row.get("numero_nf"),
+                    "emitente_nome": row.get("emitente_nome"),
+                    "dest_nome": row.get("dest_nome"),
+                    "regime_emit": row.get("regime_emit"),
+                    "regime_dest": row.get("regime_dest"),
+                    "conformidade": analise.get("conformidade"),
+                    "credito_icms": analise["credito_icms"]["valor"] if analise.get("credito_icms") else None,
+                    "credito_pis": analise["credito_pis"]["valor"] if analise.get("credito_pis") else None,
+                    "credito_cofins": analise["credito_cofins"]["valor"] if analise.get("credito_cofins") else None,
+                    "resumo_analise": row.get("resumo_analise"),
+                })
+        if analises:
+            pd.DataFrame(analises).to_excel(writer, sheet_name="Análise Fiscal", index=False)
 
     output.seek(0)
     return output.getvalue()
