@@ -228,7 +228,7 @@ def extrair_capa_de_texto(texto: str) -> dict:
                 
                 # Pegar nome do emitente (primeira linha com texto significativo)
                 if not emitente_nome and len(linha) > 5:
-                    if not any(x in linha_up for x in ["DANFE", "DOCUMENTO", "ELETRÔNICA", "ENTRADA", "SAÍDA", "---", "CHAVE", "CEP:", "FONE:", "RUA", "AV", "AVENIDA", "TRAVESSA", "ESTRADA"]):
+                    if not any(x in linha_up for x in ["DANFE", "DOCUMENTO", "ELETRÔNICA", "ENTRADA", "SAÍDA", "---", "CHAVE", "CEP:", "FONE:", "RUA", "AV", "AVENIDA", "TRAVESSA", "ESTRADA", "CONSULTA", "SÉRIE", "FOLHA", "BARRA", "SALVADOR", "0 -"]):
                         emitente_nome = linha
                         if DEBUG:
                             print(f"    ✓ Nome Emit: {emitente_nome[:50]}")
@@ -264,8 +264,8 @@ def extrair_capa_de_texto(texto: str) -> dict:
                                 dest_nome = nome_cand
                         break
                     
-                    if "RAZÃO" not in linha_up and "CNPJ" not in linha_up and len(linha) > 5:
-                        if "RUA" not in linha_up and "ENDERECO" not in linha_up:
+                    if "RAZÃO" not in linha_up and "CNPJ" not in linha_up and "DATA" not in linha_up and len(linha) > 5:
+                        if not any(x in linha_up for x in ["RUA", "ENDERECO", "CEP", "FONE", "BAIRRO", "ENTRADA", "SAÍDA", "0 -", "1 -", "CONSULTA"]):
                             dest_nome = linha
                 break
 
