@@ -15,8 +15,10 @@ Autor: Sistema de Extrator de Notas Fiscais
 """
 
 from typing import Dict, List, Optional, Any
-from codigos_fiscais import CFOP, NCM, CSOSN, OCST
+from codigos_fiscais import CFOP, NCM, CSOSN, OCST, RegimeTributario
 
+
+# =============== ANÁLISE COMO DESTINATÁRIO ===============
 
 # =============== ANÁLISE COMO DESTINATÁRIO ===============
 
@@ -32,117 +34,89 @@ def analisar_nf_como_destinatario(
     """
     Analisa a nota fiscal do ponto de vista do destinatário (empresa que recebe).
     Retorna informações sobre conformidade fiscal, créditos e possíveis alertas.
+    
+    Ajuste: Adicionada lógica para validação e cálculo de crédito mínimo.
     """
-    from codigos_fiscais import CFOP, NCM, OCST, CSOSN
+    # AJUSTE: Adicionar PISCOFINS
+    from codigos_fiscais import CFOP, NCM, OCST, CSOSN, PISCOFINS 
 
+    # 1. Normalizar Regimes
+    regime_dest = RegimeTributario.normalize(regime_destinatario)
+    regime_emit = RegimeTributario.normalize(regime_emitente)
+    
+    # Inicializar resultado
     resultado = {
-        "cfop_info": None,
-        "ncm_info": None,
-        "tributo_info": None,
-        "regime_destinatario": regime_destinatario,
-        "regime_emitente": regime_emitente,
+        "regime_destinatario": regime_dest,
+        "regime_emitente": regime_emit,
         "conformidade": True,
-        "credito_icms": {"direito": False, "valor": 0.0, "motivo": ""},
-        "credito_pis": {"direito": False, "valor": 0.0, "motivo": ""},
-        "credito_cofins": {"direito": False, "valor": 0.0, "motivo": ""},
+        "credito_icms": {"direito": False, "valor": 0.0, "motivo": "N/A"},
+        "credito_pis": {"direito": False, "valor": 0.0, "motivo": "N/A"},
+        "credito_cofins": {"direito": False, "valor": 0.0, "motivo": "N/A"},
+        "lançamento_contabil": {}, 
         "avisos": [],
         "alertas": [],
-        "lançamento_contabil": {},
+        "status": "OK"
     }
-
-    # 🔧 Normaliza CFOP e NCM (remove pontos, vírgulas e espaços)
-    cfop_limpo = str(cfop).replace(".", "").replace(",", "").strip()
-    ncm_limpo = str(ncm).replace(".", "").replace(",", "").strip()
-
-    # === 1️⃣ Busca CFOP ===
-    cfop_info = CFOP.buscar(cfop_limpo)
+    
+    # 2. Validação de Códigos Fiscais
+    cfop_info = CFOP.buscar(cfop)
     if not cfop_info:
         resultado["conformidade"] = False
-        resultado["alertas"].append(f"❌ CFOP {cfop} inválido ou não encontrado na base.")
-    else:
-        resultado["cfop_info"] = cfop_info.__dict__
-
-    # === 2️⃣ Busca NCM ===
-    ncm_info = NCM.buscar(ncm_limpo)
-    if not ncm_info:
-        resultado["avisos"].append(f"⚠️ NCM {ncm} não encontrado na base. Tentando inferir via IA...")
-        # 🔍 IA leve do Hugging Face para sugerir NCM
-        try:
-            from ia_simples import inferir_ncm
-            ncm_sugerido = inferir_ncm(ncm_limpo)
-            if ncm_sugerido:
-                resultado["avisos"].append(f"🤖 IA sugeriu NCM provável: {ncm_sugerido}")
-        except Exception as e:
-            resultado["avisos"].append(f"⚙️ IA indisponível no momento ({e})")
-    else:
-        resultado["ncm_info"] = ncm_info.__dict__
-
-    # === 3️⃣ Valida CST / CSOSN de acordo com regime ===
-    if regime_emitente == "normal":
-        ocst_info = OCST.buscar(csosn_ou_cst_recebido)
-        if not ocst_info:
+        resultado["alertas"].append(f"❌ CFOP {cfop} inválido ou não encontrado na base de dados.")
+        
+    # Verifica se CST/CSOSN é compatível com o regime do emitente
+    if regime_emit == 'simples':
+        tributo_info = CSOSN.buscar(csosn_ou_cst_recebido)
+        if not tributo_info:
             resultado["conformidade"] = False
-            resultado["alertas"].append(
-                f"❌ CST {csosn_ou_cst_recebido} inválido para regime normal. "
-                f"Consulte tabela de CST aplicável (101, 102, 201...)."
-            )
+            resultado["alertas"].append(f"❌ CSOSN {csosn_ou_cst_recebido} inválido para Simples Nacional.")
+        
+    else: # Regime Normal (Lucro Real/Presumido)
+        tributo_info = OCST.buscar(csosn_ou_cst_recebido)
+        if not tributo_info:
+            resultado["conformidade"] = False
+            # Ajuste: A mensagem anterior estava incorreta.
+            resultado["alertas"].append(f"❌ O-CST {csosn_ou_cst_recebido} inválido para Regime Normal.")
+            
+    resultado["cfop_info"] = cfop_info
+    resultado["tributo_info"] = tributo_info
+
+    # 3. Lógica de Crédito (Simplificada - Foco no Destinatário Normal)
+    
+    # Crédito de ICMS (Regime Normal Destinatário)
+    if regime_dest == 'normal':
+        if regime_emit == 'simples' and csosn_ou_cst_recebido in ["101", "201", "900"]:
+            resultado["credito_icms"]["motivo"] = "Possível crédito. Verificar valor da alíquota nas 'Informações Complementares' da NF."
+        elif cfop_info and cfop_info.icms_aplica and tributo_info and tributo_info.codigo in ['00', '20', '90']: # Cobre ICMS cobrado
+            resultado["credito_icms"]["motivo"] = "Possível crédito. Depende do destaque de ICMS na NF."
         else:
-            resultado["tributo_info"] = ocst_info.__dict__
-    else:
-        csosn_info = CSOSN.buscar(csosn_ou_cst_recebido)
-        if not csosn_info:
-            resultado["alertas"].append(
-                f"⚠️ CSOSN {csosn_ou_cst_recebido} não encontrado para regime Simples Nacional."
-            )
+            resultado["credito_icms"]["motivo"] = "Sem destaque de ICMS na nota para aproveitamento de crédito."
+
+    # Crédito de PIS/COFINS (Regime Normal Destinatário) - Simplificação
+    if regime_dest == 'normal' and cfop_info and cfop_info.tipo == "Entrada":
+        aliquotas = PISCOFINS.get_aliquota_pis_cofins(regime_dest)
+        # Crédito de PIS/COFINS geralmente é permitido para entradas (CST 50 a 66), exceto Simples Nacional
+        if regime_emit == 'normal' and tributo_info and tributo_info.codigo in ['50', '51', '52', '53', '54', '55', '56', '60', '61', '62', '63', '64', '65', '66']:
+            resultado["credito_pis"]["direito"] = True
+            resultado["credito_pis"]["valor"] = valor_total * aliquotas['pis'] / 100
+            resultado["credito_pis"]["motivo"] = "Crédito presumido de PIS (Regime Normal)."
+            
+            resultado["credito_cofins"]["direito"] = True
+            resultado["credito_cofins"]["valor"] = valor_total * aliquotas['cofins'] / 100
+            resultado["credito_cofins"]["motivo"] = "Crédito presumido de COFINS (Regime Normal)."
         else:
-            resultado["tributo_info"] = csosn_info.__dict__
+             resultado["credito_pis"]["motivo"] = "Não há direito a crédito de PIS na maioria dos casos (verificar exceções)."
+             resultado["credito_cofins"]["motivo"] = "Não há direito a crédito de COFINS na maioria dos casos (verificar exceções)."
 
-    # === 4️⃣ Simulação de direito a créditos (ICMS / PIS / COFINS) ===
-    if regime_destinatario == "normal":
-        if cfop_info and cfop_info.icms_aplica:
-            resultado["credito_icms"] = {
-                "direito": True,
-                "valor": valor_total * 0.18,
-                "motivo": "Operação tributada com direito a crédito."
-            }
-        else:
-            resultado["credito_icms"]["motivo"] = "CFOP sem destaque de ICMS."
-
-        resultado["credito_pis"] = {
-            "direito": True,
-            "valor": valor_total * 0.0165,
-            "motivo": "Regime não cumulativo - crédito PIS."
-        }
-
-        resultado["credito_cofins"] = {
-            "direito": True,
-            "valor": valor_total * 0.076,
-            "motivo": "Regime não cumulativo - crédito COFINS."
-        }
-
-    elif regime_destinatario == "simples":
-        resultado["credito_icms"]["motivo"] = "Empresa do Simples não gera crédito de ICMS."
-        resultado["credito_pis"]["motivo"] = "Simples Nacional - regime cumulativo."
-        resultado["credito_cofins"]["motivo"] = "Simples Nacional - regime cumulativo."
-
-    # === 5️⃣ Classificação contábil sugerida ===
-    try:
-        from extrator import classificar_contabilmente
-        tipo = classificar_contabilmente(cfop_limpo)
-        resultado["lançamento_contabil"] = {
-            "tipo_operacao": tipo,
-            "resumo": f"Lançamento contábil baseado no CFOP {cfop_limpo}",
-            "observacoes": [
-                f"Emitente: {regime_emitente}",
-                f"Destinatário: {regime_destinatario}",
-                f"NCM: {ncm_limpo or 'não informado'}"
-            ]
-        }
-    except Exception as e:
-        resultado["avisos"].append(f"Erro ao classificar contabilmente: {e}")
-
+    # Fallback/Avisos
+    if not resultado["credito_icms"]["direito"] and regime_dest == 'normal' and not any(aviso in resultado["credito_icms"]["motivo"] for aviso in ["Verificar", "Possível"]):
+         resultado["avisos"].append(f"⚠️ Sem direito a crédito de ICMS: {resultado['credito_icms']['motivo']}")
+    if not resultado["credito_pis"]["direito"] and regime_dest == 'normal':
+         resultado["avisos"].append(f"⚠️ Sem direito a crédito de PIS: {resultado['credito_pis']['motivo']}")
+    if not resultado["credito_cofins"]["direito"] and regime_dest == 'normal':
+         resultado["avisos"].append(f"⚠️ Sem direito a crédito de COFINS: {resultado['credito_cofins']['motivo']}")
+         
     return resultado
-
 
 # =============== CÁLCULO DE CRÉDITOS ===============
 

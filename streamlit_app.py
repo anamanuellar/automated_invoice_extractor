@@ -5,13 +5,14 @@ import os
 from pathlib import Path
 from datetime import datetime
 import pandas as pd
-from extrator import processar_pdfs, gerar_relatorio_pdf, exportar_para_excel_com_itens
+from extrator import processar_pdfs, gerar_relatorio_pdf, exportar_para_excel_com_itens 
 from codigos_fiscais_destinatario import gerar_resumo_analise, analisar_nf_como_destinatario
 from ia_simples import (
     classify_expense_hf,
     analyze_supplier_risk,
     simple_forecast,
-    add_ia_to_streamlit
+    add_ia_to_streamlit,
+    inferir_ncm 
 )
 import io
 from openpyxl import Workbook

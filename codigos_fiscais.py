@@ -25,9 +25,25 @@ DEBUG = True
 
 class RegimeTributario(Enum):
     """Regime Tributário Brasileiro"""
-    SIMPLES_NACIONAL = "100"
-    LUCRO_PRESUMIDO = "200"
-    LUCRO_REAL = "300"
+    # AJUSTE: Mudar para string minúscula para padronizar
+    SIMPLES_NACIONAL = "simples" 
+    LUCRO_PRESUMIDO = "presumido"
+    LUCRO_REAL = "real"
+    NORMAL = "normal" # Adicionar 'normal' como categoria principal para Presumido/Real
+
+    @staticmethod
+    def normalize(regime: str) -> str:
+        """Normaliza a string de regime para 'simples' ou 'normal'."""
+        if not regime:
+            return 'normal' # Default para quem não for Simples
+            
+        regime_lower = regime.lower()
+        if 'simples' in regime_lower or 'nacional' in regime_lower:
+            return 'simples'
+        if 'real' in regime_lower or 'presumido' in regime_lower or 'normal' in regime_lower:
+            return 'normal' 
+        return 'normal' # Engloba Lucro Real, Presumido e outros não Simples
+
 
 
 @dataclass

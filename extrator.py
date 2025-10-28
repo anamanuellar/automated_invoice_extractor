@@ -421,6 +421,37 @@ def extrair_itens_da_tabela(pdf_page) -> List[Dict[str, Any]]:
         if DEBUG:
             print(f"[DEBUG] Página {pdf_page.page_number}: {len(itens_extraidos)} itens encontrados (agrupamento aplicado)")
 
+        # === 3️⃣ Pós-processamento para limpeza e extração de códigos ===
+        itens_limpos = []
+        for item in itens_extraidos:
+            desc = str(item.get("descricao", "")).upper()
+
+            # Descartar ruídos típicos
+            if any(x in desc for x in ["CNPJ", "ENDEREÇO", "INSCRIÇÃO", "NOTA FISCAL", "VALOR", "DESTINATÁRIO", "EMITENTE"]):
+                continue
+
+            # Filtrar linhas sem valor válido
+            if not item.get("valor_total") or item["valor_total"] <= 0:
+                continue
+
+            # Extração heurística de NCM e CST/CSOSN dentro da descrição
+            if not item.get("ncm"):
+                match_ncm = re.search(r"\b(\d{8})\b", desc)
+                if match_ncm:
+                    item["ncm"] = match_ncm.group(1)
+
+            if not item.get("csosn") and not item.get("ocst"):
+                match_cst = re.search(r"\b(0\d{2}|10|20|30|40|41|50|60|70|90)\b", desc)
+                if match_cst:
+                    item["ocst"] = match_cst.group(1)
+
+            itens_limpos.append(item)
+
+        if DEBUG:
+            print(f"[DEBUG] {len(itens_limpos)} itens válidos após limpeza")
+
+        return itens_limpos
+
         return itens_extraidos
 
     except Exception as e:
@@ -880,31 +911,49 @@ def exportar_para_excel(df: pd.DataFrame) -> bytes:
     return output.getvalue()
 
 def exportar_para_excel_com_itens(df: pd.DataFrame) -> bytes:
+    """Exporta o DataFrame principal, a lista de itens e o resumo fiscal para um arquivo Excel com abas."""
     output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        # Aba principal
-        df.drop(columns=["itens_nf"], errors="ignore").to_excel(writer, sheet_name="Notas Fiscais", index=False)
 
-        # Aba de itens
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        
+        # 1. Aba Principal (Notas Fiscais)
+        # Removendo colunas complexas para a aba principal
+        df_principal = df.drop(columns=["analise_destinatario", "resumo_analise", "itens_nf"], errors='ignore')
+        df_principal.to_excel(writer, sheet_name='Notas Fiscais', index=False)
+
+        # 2. Aba de Itens
         todas_linhas = []
         for _, row in df.iterrows():
-            if isinstance(row.get("itens_nf"), list):
-                for item in row["itens_nf"]:
-                    todas_linhas.append({
-                        "arquivo": row["arquivo"],
-                        "numero_nf": row.get("numero_nf"),
-                        "emitente_nome": row.get("emitente_nome"),
-                        "data_emissao": row.get("data_emissao"),
-                        "valor_nf": row.get("valor_total_num"),
-                        "regime_emit": row.get("regime_emit"),
-                        "regime_dest": row.get("regime_dest"),
-                        "regime_final": row.get("regime_final"),
-                        **item
-                    })
+            itens = row.get("itens_nf", [])
+            regime_emit = row.get("regime_emit")
+            regime_dest = row.get("regime_dest")
+            regime_final = row.get("regime_final")
+            for item in itens:
+                # AJUSTE: Filtro Mínimo para evitar linhas "lixo" na extração de itens (endereços, labels)
+                descricao = str(item.get("descricao", "")).strip()
+                # Remove linhas muito curtas ou que parecem ser rótulos
+                if len(descricao) < 5 or any(palavra in descricao.lower() for palavra in ["cnpj", "cpf", "endereço", "cep", "valor", "total"]):
+                    continue
+                    
+                todas_linhas.append({
+                    "arquivo": row["arquivo"],
+                    "numero_nf": row.get("numero_nf"),
+                    "emitente_nome": row.get("emitente_nome"),
+                    "dest_nome": row.get("dest_nome"),
+                    "data_emissao": row.get("data_emissao"),
+                    "valor_nf": row.get("valor_total_num"),
+                    "regime_emit": regime_emit,
+                    "regime_dest": regime_dest,
+                    "regime_final": regime_final,
+                    **item
+                })
         if todas_linhas:
-            pd.DataFrame(todas_linhas).to_excel(writer, sheet_name="Itens Detalhados", index=False)
-
-        # Aba de análises fiscais
+            df_itens = pd.DataFrame(todas_linhas)
+            # AJUSTE: Renomear colunas inconsistentes
+            df_itens = df_itens.rename(columns={'cfop_desc': 'CFOP Desc.', 'ncm_desc': 'NCM Desc.'})
+            df_itens.to_excel(writer, sheet_name="Itens Detalhados", index=False)
+            
+        # 3. Aba de Análises Fiscais
         analises = []
         for _, row in df.iterrows():
             analise = row.get("analise_destinatario")
@@ -920,7 +969,7 @@ def exportar_para_excel_com_itens(df: pd.DataFrame) -> bytes:
                     "credito_icms": analise["credito_icms"]["valor"] if analise.get("credito_icms") else None,
                     "credito_pis": analise["credito_pis"]["valor"] if analise.get("credito_pis") else None,
                     "credito_cofins": analise["credito_cofins"]["valor"] if analise.get("credito_cofins") else None,
-                    #   "resumo_analise": row.get("resumo_analise"),
+                    # REMOVIDO: A coluna resumo_analise foi removida para limpar a planilha de análise.
                 })
         if analises:
             pd.DataFrame(analises).to_excel(writer, sheet_name="Análise Fiscal", index=False)

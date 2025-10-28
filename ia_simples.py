@@ -1,11 +1,11 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-# CORREÇÃO 1: Usar tipos flexíveis para acalmar o Pylance
 from typing import Dict, List, Any, Optional, Union, Sequence 
 import warnings
 warnings.filterwarnings('ignore')
 from transformers import pipeline
+import plotly.graph_objects as go
 
 # =============== HUGGING FACE  ===============
 
@@ -593,14 +593,23 @@ def add_ia_to_streamlit(df: pd.DataFrame) -> None:
 
 def inferir_ncm(descricao_produto: str) -> str:
     """
-    Usa um modelo leve do Hugging Face para sugerir o NCM provável
-    com base na descrição textual do item.
+    Função para sugerir o NCM provável com base na descrição.
+    
+    Ajuste: O modelo anterior ("mrm8488/...") era inadequado para classificação de NCM. 
+    Esta versão usa uma lógica simples baseada em palavras-chave e retorna um placeholder,
+    recomendando um modelo especializado.
     """
-    try:
-        classifier = pipeline("text-classification", model="mrm8488/distilroberta-finetuned-financial-news-sentiment-analysis")
-        res = classifier(f"Produto: {descricao_produto}")
-        if isinstance(res, list) and len(res) > 0:
-            return res[0].get("label", "NCM não identificado")
-    except Exception:
-        pass
-    return "NCM não identificado"
+    
+    # Exemplo de lógica de inferência básica (Melhor que usar um modelo errado)
+    descricao_normalizada = descricao_produto.lower()
+    
+    if "computador" in descricao_normalizada or "servidor" in descricao_normalizada:
+        return "8471.00.00"
+    if "cabo" in descricao_normalizada or "fio" in descricao_normalizada:
+        return "8544.42.00"
+    if "serviço" in descricao_normalizada or "consultoria" in descricao_normalizada:
+        return "Serviço"
+        
+    # TODO: Substituir por um modelo Hugging Face (ou outro) treinado 
+    # especificamente para classificação de NCM, ex: pipeline("text-classification", model="meu/modelo-ncm-treinado").
+    return "NCM não inferido"
