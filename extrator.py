@@ -1,13 +1,12 @@
-# extrator_final.py - Extrator robusto para NFes (texto + imagem + OCR melhorado)
 import os, io, re, requests, time
 from pathlib import Path
 from datetime import datetime
 from typing import Any, cast
-
+import numpy as np
 import pdfplumber
 import pandas as pd
 from PIL import Image, ImageEnhance, ImageOps
-import fitz  # PyMuPDF
+import fitz # PyMuPDF
 
 # =============== CONFIG ===============
 DEBUG = False
@@ -15,14 +14,14 @@ CNPJ_CACHE: dict[str, dict] = {}
 
 # =============== REGEX ===============
 RE_MOEDA = re.compile(r"R?\$?\s*(\d{1,3}(?:\.\d{3})*,\d{2})")
-RE_DATA  = re.compile(r"\b\d{2}/\d{2}/\d{4}\b")
+RE_DATA = re.compile(r"\b\d{2}/\d{2}/\d{4}\b")
 
 RE_NF_MAIN   = re.compile(r"NOTA\s+FISCAL\s+ELETR[ÔO]NICA\s*N[ºO]?\s*([\d\.]+)", re.I)
 RE_NF_ALT    = re.compile(r"\b(?:NF-?E|N[ºO]|NUM(?:ERO)?|NRO)\s*[:\-]?\s*([\d\.]+)", re.I)
 RE_NF_NUMERO = re.compile(r"N[ºO\.]?\s*[:\-]?\s*(\d{1,6})", re.I)
 
-RE_SERIE   = re.compile(r"S[ÉE]RIE\s*[:\-]?\s*([0-9\.]{1,5})", re.I)
-RE_SERIE_ALT = re.compile(r"(?:^|\n)S[ÉE]RIE\s*[:\-]?\s*(\d+)", re.I)
+RE_SERIE      = re.compile(r"S[ÉE]RIE\s*[:\-]?\s*([0-9\.]{1,5})", re.I)
+RE_SERIE_ALT  = re.compile(r"(?:^|\n)S[ÉE]RIE\s*[:\-]?\s*(\d+)", re.I)
 
 RE_CNPJ_MASK   = re.compile(r"\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}")
 RE_CNPJ_PLAIN  = re.compile(r"\b\d{14}\b")
@@ -46,7 +45,6 @@ HEADERS = {"User-Agent": "NF-Cover-Extractor/1.0"}
 EASY_OCR = None
 
 def carregar_easy_ocr():
-    """Carrega EasyOCR"""
     try:
         import easyocr
         reader = easyocr.Reader(['pt', 'en'], gpu=False)
@@ -101,177 +99,8 @@ def pick_last_money_on_same_or_next_lines(linhas, idx, max_ahead=6):
         if v: return v
     return None
 
-# =============== CNPJ ===============
-def calcula_dvs_cnpj(base12: str) -> tuple[int,int]:
-    nums = [int(x) for x in base12]
-    pesos1 = [5,4,3,2,9,8,7,6,5,4,3,2]
-    s1 = sum(n*p for n,p in zip(nums, pesos1))
-    r1 = s1 % 11
-    dv1 = 0 if r1 < 2 else 11 - r1
-    pesos2 = [6,5,4,3,2,9,8,7,6,5,4,3,2]
-    nums2 = nums + [dv1]
-    s2 = sum(n*p for n,p in zip(nums2, pesos2))
-    r2 = s2 % 11
-    dv2 = 0 if r2 < 2 else 11 - r2
-    return dv1, dv2
-
-def cnpj_raiz_0001(cnpj_digits: str) -> str:
-    d = somente_digitos(cnpj_digits)
-    if len(d) != 14:
-        return d
-    base8 = d[:8]
-    base12 = base8 + "0001"
-    dv1, dv2 = calcula_dvs_cnpj(base12)
-    return base12 + str(dv1) + str(dv2)
-
-def _try_brasilapi(cnpj14: str) -> dict | None:
-    try:
-        url = f"https://brasilapi.com.br/api/cnpj/v1/{cnpj14}"
-        r = requests.get(url, headers=HEADERS, timeout=10)
-        if r.status_code == 200:
-            data = r.json()
-            razao = data.get("razao_social") or data.get("nome_fantasia")
-            if razao:
-                return {"nome": razao, "fonte": "brasilapi"}
-    except:
-        pass
-    return None
-
-def _try_publica(cnpj14: str) -> dict | None:
-    try:
-        url = f"https://publica.cnpj.ws/cnpj/{cnpj14}"
-        r = requests.get(url, headers=HEADERS, timeout=12)
-        if r.status_code == 200:
-            data = r.json()
-            razao = data.get("razao_social") or (data.get("estabelecimento") or {}).get("razao_social")
-            if razao:
-                return {"nome": razao, "fonte": "publica"}
-    except:
-        pass
-    return None
-
-def _try_receitaws(cnpj14: str) -> dict | None:
-    try:
-        url = f"https://www.receitaws.com.br/v1/cnpj/{cnpj14}"
-        r = requests.get(url, headers=HEADERS, timeout=12)
-        if r.status_code == 200:
-            data = r.json()
-            if (data.get("status") or "").upper() == "OK":
-                nome = data.get("nome") or data.get("fantasia")
-                if nome:
-                    return {"nome": nome, "fonte": "receitaws"}
-    except:
-        pass
-    return None
-
-def consulta_nome_por_cnpj(cnpj_raw: str, usar_raiz=True) -> str | None:
-    if not cnpj_raw:
-        return None
-    d = somente_digitos(cnpj_raw)
-    if len(d) != 14:
-        return None
-
-    if usar_raiz:
-        d = cnpj_raiz_0001(d)
-
-    if d in CNPJ_CACHE:
-        return CNPJ_CACHE[d].get("nome")
-
-    for fn in (_try_brasilapi, _try_publica, _try_receitaws):
-        data = fn(d)
-        if data and data.get("nome"):
-            CNPJ_CACHE[d] = data
-            return data.get("nome")
-        time.sleep(0.2)
-
-    CNPJ_CACHE[d] = {"nome": None, "fonte": None}
-    return None
-
-# =============== PROCESSAMENTO DE IMAGEM ===============
-def melhorar_imagem_para_ocr(img: Image.Image) -> Image.Image:
-    """Melhora imagem para OCR usando apenas PIL"""
-    try:
-        img = img.convert('RGB')
-        
-        # Aumentar resolução
-        img = img.resize((img.width * 2, img.height * 2), Image.Resampling.LANCZOS)
-        
-        # Aumentar contraste
-        enhancer = ImageEnhance.Contrast(img)
-        img = enhancer.enhance(2)
-        
-        # Aumentar brilho se necessário
-        enhancer_brightness = ImageEnhance.Brightness(img)
-        img = enhancer_brightness.enhance(1.1)
-        
-        # Aumentar nitidez
-        enhancer_sharp = ImageEnhance.Sharpness(img)
-        img = enhancer_sharp.enhance(2)
-        
-        return img
-    except:
-        return img
-
-def extrair_texto_ocr(pdf_path: str, progress_callback=None) -> str:
-    """Extrai texto com EasyOCR e trata rotação"""
-    global EASY_OCR
-    
-    texto_acumulado = []
-    
-    try:
-        if EASY_OCR is None:
-            if progress_callback:
-                progress_callback("📥 Carregando EasyOCR...")
-            EASY_OCR = carregar_easy_ocr()
-        
-        if not EASY_OCR:
-            return ""
-        
-        doc = fitz.open(pdf_path)
-        
-        for page_num in range(doc.page_count):
-            try:
-                page = doc.load_page(page_num)
-                
-                # Verificar rotação e corrigir se necessário
-                rotacao = page.rotation
-                if rotacao != 0:
-                    page.set_rotation((360 - rotacao) % 360)
-                
-                # Extrair como imagem com alta resolução
-                mat = fitz.Matrix(3, 3)
-                pix = page.get_pixmap(matrix=mat)
-                img = Image.open(io.BytesIO(pix.tobytes("png")))
-                
-                # Melhorar imagem
-                img = melhorar_imagem_para_ocr(img)
-                
-                # OCR
-                resultado = EASY_OCR.readtext(img)
-                
-                if resultado:
-                    for item in resultado:
-                        if isinstance(item, (list, tuple)) and len(item) >= 2:
-                            texto_str = str(item[1]) if len(item) > 1 else ""
-                            confianca_val = float(item[2]) if len(item) > 2 else 0.0
-                            
-                            if texto_str and len(texto_str.strip()) > 0 and confianca_val > 0.2:
-                                texto_acumulado.append(texto_str)
-                
-            except Exception as e:
-                if DEBUG: print(f"Erro OCR página {page_num + 1}: {e}")
-                continue
-        
-        doc.close()
-        return "\n".join(texto_acumulado)
-    
-    except Exception as e:
-        if DEBUG: print(f"Erro EasyOCR: {e}")
-        return ""
-
 # =============== EXTRAÇÃO DE TEXTO ===============
 def extrair_capa_de_texto(texto: str) -> dict:
-    """Extrai dados de DANFE com suporte a múltiplos layouts"""
     numero_nf: str | None = None
     serie: str | None = None
     emitente_nome: str | None = None
@@ -283,21 +112,17 @@ def extrair_capa_de_texto(texto: str) -> dict:
 
     linhas = texto.split("\n")
 
-    # ========== ESTRATÉGIA 1: Buscar "Nº.: XXX.XXX.###" (layout mais comum) ==========
+    # -------- NF Número/Série --------
     for ln in linhas:
         if not numero_nf:
-            # Padrão: "Nº.: 000.094.615" ou "Nº.: 000.000.671"
             m = re.search(r"N[°ºO]\.\s*[:\-]?\s*(\d{3}\.\d{3}\.\d{3,6})", ln)
             if m:
                 cand = m.group(1).replace(".", "")
                 try:
                     val = int(cand)
-                    # Pegar últimos 6 dígitos (remove zeros à esquerda)
-                    numero_nf = str(val % 1000000).lstrip('0') or "0"
+                    numero_nf = str(val % 1000000).lstrip("0") or "0"
                 except:
                     pass
-            
-            # Se não encontrou, tentar padrão simples: "Nº 672" ou "N° 672"
             if not numero_nf:
                 m = re.search(r"N[°ºO]\s*[:\-]?\s*(\d{1,6})(?:\D|$)", ln)
                 if m:
@@ -308,56 +133,49 @@ def extrair_capa_de_texto(texto: str) -> dict:
                             numero_nf = str(val)
                     except:
                         pass
+        if not serie:
+            m = RE_SERIE.search(ln)
+            if m:
+                serie = m.group(1)
+            if not serie:
+                m = RE_SERIE_ALT.search(ln)
+                if m:
+                    serie = m.group(1)
 
-    # ========== ESTRATÉGIA 2: Buscar EMITENTE ==========
-    # Procurar por "IDENTIFICAÇÃO DO EMITENTE" e depois o nome e CNPJ
+    # -------- EMITENTE --------
     for i, ln in enumerate(linhas):
         up = ln.upper()
-        
         if "IDENTIFICAÇÃO DO EMITENTE" in up:
-            # Próximas 10 linhas podem ter nome e CNPJ
             for j in range(i + 1, min(i + 10, len(linhas))):
                 linha_emit = linhas[j].strip()
-                
-                # Procurar CNPJ primeiro (é mais confiável)
                 doc_emit = achar_doc_em_linha(linha_emit)
                 if doc_emit and len(somente_digitos(doc_emit)) == 14:
                     emitente_doc = doc_emit
-                
-                # Nome vem antes do CNPJ ou em linhas separadas
                 if linha_emit and len(linha_emit) > 5:
-                    # Descartar linhas que são headers ou valores
-                    if not any(x in up for x in ["DANFE", "DOCUMENTO", "AUXILIAR", "CEP", "ENDEREÇO", "FONE", "CNPJ", "CPF"]):
-                        # Se tem CNPJ na linha, pegar o nome antes dele
+                    if not any(x in up for x in ["DANFE","DOCUMENTO","AUXILIAR","CEP","ENDEREÇO","FONE","CNPJ","CPF"]):
                         if doc_emit and doc_emit in linha_emit:
                             nome_cand = linha_emit.split(doc_emit)[0].strip()
                             if nome_cand and len(nome_cand) > 3 and nome_cand not in ["", "1", "0"]:
                                 emitente_nome = nome_cand
-                        # Se não tem CNPJ mas tem nome válido
                         elif not emitente_doc and not doc_emit and len(linha_emit) > 5:
                             if not re.search(r"^\d+$", linha_emit):
                                 emitente_nome = linha_emit
             break
 
-    # ========== ESTRATÉGIA 3: Buscar DESTINATÁRIO ==========
+    # -------- DESTINATÁRIO --------
     for i, ln in enumerate(linhas):
         up = ln.upper()
-        
         if "DESTINATÁRIO" in up or "REMETENTE" in up:
-            # Próximas linhas têm razão social e CNPJ
             for j in range(i + 1, min(i + 6, len(linhas))):
                 linha_dest = linhas[j]
-                
-                # Procurar CNPJ
                 doc_dest = achar_doc_em_linha(linha_dest)
                 if doc_dest and len(somente_digitos(doc_dest)) == 14:
                     dest_doc = doc_dest
-                    # Tentar extrair nome da mesma linha antes do CNPJ
                     partes = linha_dest.split(doc_dest)
                     if partes[0].strip():
                         dest_nome = partes[0].strip()
 
-    # ========== ESTRATÉGIA 4: Buscar DATA DE EMISSÃO ==========
+    # -------- DATA DE EMISSÃO --------
     for ln in linhas:
         if not data_emissao:
             md = RE_DATA.search(ln)
@@ -369,24 +187,20 @@ def extrair_capa_de_texto(texto: str) -> dict:
                 except:
                     pass
 
-    # ========== ESTRATÉGIA 5: Buscar VALOR TOTAL ==========
+    # -------- VALOR TOTAL --------
     for i, ln in enumerate(linhas):
         up = ln.upper()
-        
-        # "VALOR TOTAL DA NOTA" é o padrão mais confiável
         if "VALOR TOTAL DA NOTA" in up:
             v = pick_last_money_on_same_or_next_lines(linhas, i, 3)
             if v:
                 valor_total = v
                 break
-        
-        # Alternativa: "V. TOTAL PRODUTOS"
         if not valor_total and "V. TOTAL" in up and "PRODUTOS" in up:
             v = pick_last_money_on_same_or_next_lines(linhas, i, 2)
             if v:
                 valor_total = v
 
-    resultado = cast(dict[str, Any], {
+    resultado = {
         "numero_nf": numero_nf,
         "serie": serie,
         "emitente_doc": emitente_doc,
@@ -396,21 +210,59 @@ def extrair_capa_de_texto(texto: str) -> dict:
         "data_emissao": data_emissao,
         "valor_total": valor_total,
         "valor_total_num": moeda_to_float(valor_total),
-    })
+    }
     return resultado
 
+def extrair_texto_ocr(arquivo_pdf, progress_callback=None):
+    import fitz  # PyMuPDF
+    from PIL import Image
+    import io
+
+    global EASY_OCR
+    if EASY_OCR is None:
+        EASY_OCR = carregar_easy_ocr()
+        if EASY_OCR is None:
+            raise Exception("EasyOCR não está instalado ou configurado.")
+
+    texto_total = ""
+    doc = fitz.open(arquivo_pdf)
+    for page_num in range(len(doc)):
+        page = doc.load_page(page_num)
+        pix = page.get_pixmap(dpi=300)
+        img = Image.open(io.BytesIO(pix.tobytes()))
+        result = EASY_OCR.readtext(np.array(img), detail=0, paragraph=True)
+        # Se 'result' for uma lista de strings, mantenha. 
+        # Se for uma lista de listas/dicionários, filtre apenas os textos.
+        if isinstance(result, list):
+            # EasyOCR retorna lista de tuplas: [ [bbox, texto, conf], ... ]
+            textos = []
+            for item in result:
+                if isinstance(item, str):
+                    textos.append(item)
+                elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                    textos.append(str(item[1]))
+                elif isinstance(item, dict) and "text" in item:
+                    textos.append(item["text"])
+            texto_page = " ".join(textos)
+        else:
+            texto_page = str(result)
+
+        texto_total += texto_page + "\n"
+
+        if progress_callback:
+            progress_callback(f"OCR: página {page_num+1}/{len(doc)}")
+
+    return texto_total
 
 
 def extrair_capa_de_pdf(arquivo_pdf: str, progress_callback=None) -> dict:
     nome_arquivo = Path(arquivo_pdf).name
-    
     try:
         with pdfplumber.open(arquivo_pdf) as pdf:
             for page in pdf.pages:
                 txt = page.extract_text() or ""
                 if txt and len(txt.strip()) > 100:
                     dados = extrair_capa_de_texto(txt)
-                    
                     if any([dados["numero_nf"], dados["emitente_doc"], dados["dest_doc"], dados["valor_total"]]):
                         if progress_callback:
                             progress_callback(f"✅ pdfplumber: {nome_arquivo}")
@@ -421,12 +273,9 @@ def extrair_capa_de_pdf(arquivo_pdf: str, progress_callback=None) -> dict:
     try:
         if progress_callback:
             progress_callback(f"🔄 OCR: {nome_arquivo}")
-        
         texto_ocr = extrair_texto_ocr(arquivo_pdf, progress_callback)
-        
         if texto_ocr and len(texto_ocr.strip()) > 100:
             dados = extrair_capa_de_texto(texto_ocr)
-            
             if any([dados["numero_nf"], dados["emitente_doc"], dados["dest_doc"], dados["valor_total"]]):
                 if progress_callback:
                     progress_callback(f"✅ OCR: {nome_arquivo}")
@@ -434,36 +283,12 @@ def extrair_capa_de_pdf(arquivo_pdf: str, progress_callback=None) -> dict:
     except Exception as e:
         if progress_callback:
             progress_callback(f"❌ {e}")
-    
-    vazio = cast(dict[str, Any], {k: None for k in [
+
+    vazio = {k: None for k in [
         "numero_nf","serie","emitente_doc","emitente_nome",
         "dest_doc","dest_nome","data_emissao","valor_total","valor_total_num"
-    ]})
-    
+    ]}
     return {"arquivo": nome_arquivo, **vazio}
-
-def enriquecer_com_cnpj(df: pd.DataFrame, progress_callback=None) -> pd.DataFrame:
-    for idx in df.index:
-        em_doc = df.loc[idx, "emitente_doc"]
-        if em_doc:
-            cnpj_digits = somente_digitos(em_doc)
-            if len(cnpj_digits) == 14:
-                nome_cnpj = consulta_nome_por_cnpj(cnpj_digits, usar_raiz=True)
-                if nome_cnpj:
-                    if df.loc[idx, "emitente_nome"] != nome_cnpj:
-                        if progress_callback:
-                            progress_callback(f"✓ {nome_cnpj}")
-                        df.loc[idx, "emitente_nome"] = nome_cnpj
-
-        de_doc = df.loc[idx, "dest_doc"]
-        if de_doc:
-            d_digits = somente_digitos(de_doc)
-            if len(d_digits) == 14:
-                nome_cnpj = consulta_nome_por_cnpj(d_digits, usar_raiz=True)
-                if nome_cnpj:
-                    if df.loc[idx, "dest_nome"] != nome_cnpj:
-                        df.loc[idx, "dest_nome"] = nome_cnpj
-    return df
 
 def processar_pdfs(arquivos_pdf: list, progress_callback=None) -> pd.DataFrame:
     regs = []
@@ -471,19 +296,12 @@ def processar_pdfs(arquivos_pdf: list, progress_callback=None) -> pd.DataFrame:
         if progress_callback:
             progress_callback(f"[{i}/{len(arquivos_pdf)}] {Path(pdf_path).name}")
         regs.append(extrair_capa_de_pdf(pdf_path, progress_callback))
-
     df = pd.DataFrame(regs).drop_duplicates(subset=["arquivo"], keep="first")
-
     try:
         df["_ordem"] = pd.to_datetime(df["data_emissao"], format="%d/%m/%Y", errors="coerce")
         df = df.sort_values(by=["_ordem","arquivo"], na_position="last").drop(columns=["_ordem"])
     except:
         pass
-
-    if progress_callback:
-        progress_callback("🔍 Enriquecendo...")
-    df = enriquecer_com_cnpj(df, progress_callback)
-    
     return df
 
 def exportar_para_excel(df: pd.DataFrame) -> bytes:
