@@ -199,7 +199,7 @@ if uploaded_files:
                 # Display da tabela com scroll
                 st.dataframe(
                     df_filtrado,
-                    use_container_width=True,
+                    width="stretch",
                     height=400,
                     column_config={
                         "numero_nf": st.column_config.TextColumn("NF", width=80),
@@ -238,7 +238,7 @@ if uploaded_files:
                         data=excel_data,
                         file_name=f"notas_fiscais_{timestamp}.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True
+                        width="stretch"
                     )
                 
                 with col2:
@@ -248,7 +248,7 @@ if uploaded_files:
                         data=csv_data,
                         file_name=f"notas_fiscais_{timestamp}.csv",
                         mime="text/csv",
-                        use_container_width=True
+                        width="stretch"
                     )
                 
                 # Estatísticas avançadas

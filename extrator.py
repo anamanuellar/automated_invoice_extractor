@@ -128,74 +128,52 @@ def consulta_cnpj_api(cnpj: str) -> Optional[str]:
 
 def extrair_itens_da_tabela(pdf_page) -> List[Dict[str, Any]]:
     """
-    Extrai itens (produtos/serviços) da NF-e.
-    Faz fallback automático para extração via coordenadas se a tabela não for detectada.
+    Extrai itens (produtos/serviços) da NF-e mesmo quando não há tabela formal.
+    Faz fallback automático usando extract_words e regex.
     """
-    table_settings = {
-        "vertical_strategy": "text",
-        "horizontal_strategy": "text",
-        "snap_x_tolerance": 5,
-        "snap_y_tolerance": 3,
-        "join_tolerance": 3,
-    }
-
     itens_extraidos: List[Dict[str, Any]] = []
 
     try:
-        # === 1. Tentativa com extract_tables ===
-        tables = pdf_page.extract_tables(table_settings)
-
-        if DEBUG:
-            print(f"[DEBUG] {len(tables)} tabela(s) detectada(s) na página {pdf_page.page_number}")
+        # === 1. Tentativa padrão com pdfplumber ===
+        tables = pdf_page.extract_tables({
+            "vertical_strategy": "text",
+            "horizontal_strategy": "text",
+            "snap_x_tolerance": 5,
+            "snap_y_tolerance": 3,
+            "join_tolerance": 3,
+        })
 
         for table in tables:
             if not table or len(table) < 2:
                 continue
 
-            header_row = [str(c).upper().strip().replace('\n', ' ') for c in table[0] if c]
-            mapa_colunas = {}
+            header = [str(c).upper().strip() for c in table[0] if c]
+            mapa = {}
+            for i, h in enumerate(header):
+                if any(k in h for k in ["DESCRIÇÃO", "PRODUTO", "SERVIÇO"]):
+                    mapa["desc"] = i
+                elif any(k in h for k in ["VALOR TOTAL", "VL TOTAL", "VALOR", "TOTAL R$"]):
+                    mapa["valor"] = i
 
-            for i, col_name in enumerate(header_row):
-                if any(k in col_name for k in ['DESCRIÇÃO', 'PRODUTO', 'SERVIÇO']):
-                    mapa_colunas['descricao'] = i
-                elif any(k in col_name for k in ['VALOR TOTAL', 'VLR TOTAL', 'TOTAL R$', 'TOTAL']):
-                    mapa_colunas['valor_total'] = i
-                elif any(k in col_name for k in ['VALOR UNIT', 'VL UNIT', 'UNIT']):
-                    mapa_colunas['valor_unit'] = i
-
-            if 'descricao' not in mapa_colunas:
+            if "desc" not in mapa or "valor" not in mapa:
                 continue
 
-            valor_col_index = mapa_colunas.get('valor_total', mapa_colunas.get('valor_unit'))
-            desc_col_index = mapa_colunas['descricao']
-            if valor_col_index is None:
-                continue
-
-            for row_idx, row in enumerate(table[1:], start=1):
-                if not any(row):
+            for row in table[1:]:
+                if not row or len(row) <= max(mapa.values()):
                     continue
-                if valor_col_index >= len(row) or desc_col_index >= len(row):
-                    continue
-
-                descricao_str = str(row[desc_col_index]).strip() if row[desc_col_index] else ""
-                valor_str = str(row[valor_col_index]).strip() if row[valor_col_index] else ""
-
-                # Regex mais flexível para valores
-                valor_num = moeda_to_float(valor_str)
-                if valor_num is None:
-                    match = re.search(r"(\d{1,3}(?:[\.,]\d{3})*[\.,]\d{2})", valor_str)
-                    if match:
-                        valor_num = moeda_to_float(match.group(1))
-
-                if len(descricao_str) > 4 and valor_num and valor_num > 0.01:
-                    if any(k in descricao_str.upper() for k in ["OBSERVA", "INF. COMPL", "DADOS DOS"]):
-                        continue
+                descricao = str(row[mapa["desc"]]).strip()
+                valor = str(row[mapa["valor"]]).strip()
+                val_num = moeda_to_float(valor)
+                if not val_num:
+                    m = re.search(r"(\d+(?:[.,]\d{2,3}))", valor)
+                    if m: val_num = moeda_to_float(m.group(1))
+                if len(descricao) > 4 and val_num and val_num > 0.01:
                     itens_extraidos.append({
-                        "descricao_item": descricao_str,
-                        "valor_item": valor_num
+                        "descricao_item": descricao,
+                        "valor_item": round(val_num, 2)
                     })
 
-        # === 2. Fallback: extract_words se nada foi encontrado ===
+        # === 2. Fallback: varrer o texto por linhas ===
         if not itens_extraidos:
             words = pdf_page.extract_words()
             linhas = {}
@@ -203,32 +181,32 @@ def extrair_itens_da_tabela(pdf_page) -> List[Dict[str, Any]]:
                 y = round(w["top"] / 5) * 5
                 linhas.setdefault(y, []).append(w["text"])
 
-            for _, textos in sorted(linhas.items()):
-                linha_txt = " ".join(textos).strip()
-                if not linha_txt:
+            for _, palavras in sorted(linhas.items()):
+                linha = " ".join(palavras)
+                if len(linha) < 10:
                     continue
-                match_valor = re.search(r"(\d{1,3}(?:[\.,]\d{3})*[\.,]\d{2})", linha_txt)
-                if match_valor and not any(k in linha_txt.upper() for k in ["TOTAL", "VALOR DA NOTA"]):
-                    valor = moeda_to_float(match_valor.group(1))
+                if any(k in linha.upper() for k in ["CÓDIGO", "PRODUTO", "DESCRIÇÃO", "TOTAL", "ICMS", "IPI"]):
+                    continue
+                m = re.search(r"(\d{1,3}(?:[.,]\d{3})*[.,]\d{2,3})", linha)
+                if m:
+                    valor = moeda_to_float(m.group(1))
                     if valor and valor > 0:
-                        partes = linha_txt.split(match_valor.group(1))
-                        descricao = partes[0].strip() if partes else ""
-                        if len(descricao) > 4:
+                        desc = linha.split(m.group(1))[0].strip()
+                        if len(desc) > 4:
                             itens_extraidos.append({
-                                "descricao_item": descricao,
-                                "valor_item": valor
+                                "descricao_item": desc,
+                                "valor_item": round(valor, 2)
                             })
 
         if DEBUG:
-            print(f"[DEBUG] {len(itens_extraidos)} itens extraídos da página {pdf_page.page_number}")
+            print(f"[DEBUG] Página {pdf_page.page_number}: {len(itens_extraidos)} itens encontrados")
 
         return itens_extraidos
 
     except Exception as e:
         if DEBUG:
-            print(f"[DEBUG] Erro na extração de itens da página {pdf_page.page_number}: {e}")
+            print(f"[DEBUG] Erro em extrair_itens_da_tabela: {e}")
         return []
-
 
 
 # ==================== FUNÇÕES DE EXTRAÇÃO (ADAPTADAS) ====================
