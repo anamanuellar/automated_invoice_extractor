@@ -151,7 +151,7 @@ if uploaded_files:
     # Processar PDFs
     with st.spinner("🔄 Processando arquivos..."):
         try:
-            df = processar_pdfs(pdf_paths, progress_callback=update_progress)
+            df = processar_pdfs(pdf_paths, _progress_callback=update_progress)
             
             progress_bar.progress(100)
             

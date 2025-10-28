@@ -604,8 +604,8 @@ def extrair_capa_de_pdf(arquivo_pdf: str, progress_callback=None) -> dict:
 
 # =============== FUNÇÕES DE PROCESSAMENTO (ADAPTADAS) ===============
 
-@st.cache_data(show_spinner=False, ttl=86400)  # Cache Streamlit (24h)
-def processar_pdfs(arquivos_pdf: list, progress_callback=None) -> pd.DataFrame:
+@st.cache_data(show_spinner=False, ttl=86400)
+def processar_pdfs(arquivos_pdf: list, _progress_callback=None) -> pd.DataFrame:
     """
     Processa múltiplos PDFs com cache híbrido:
       - Streamlit cache (24h)
@@ -616,21 +616,21 @@ def processar_pdfs(arquivos_pdf: list, progress_callback=None) -> pd.DataFrame:
 
     for i, pdf_path in enumerate(arquivos_pdf, 1):
         nome = Path(pdf_path).name
-        if progress_callback:
-            progress_callback(f"[{i}/{len(arquivos_pdf)}] {nome}")
+        if _progress_callback:
+            _progress_callback(f"[{i}/{len(arquivos_pdf)}] {nome}")
 
         # === 1️⃣ Gera hash e tenta carregar cache ===
         hash_pdf = get_pdf_hash(pdf_path)
         cached = carregar_cache_nf(hash_pdf)
         if cached:
-            if progress_callback:
-                progress_callback(f"⚡ Loaded from cache: {nome}")
+            if _progress_callback:
+                _progress_callback(f"⚡ Loaded from cache: {nome}")
             regs.append(cached)
             continue
 
         # === 2️⃣ Se não houver cache, processa normalmente ===
         try:
-            data = extrair_capa_de_pdf(pdf_path, progress_callback)
+            data = extrair_capa_de_pdf(pdf_path, _progress_callback)
             regs.append(data)
             salvar_cache_nf(hash_pdf, data)
         except Exception as e:
