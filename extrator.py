@@ -143,30 +143,11 @@ def extrair_capa_de_texto(texto: str) -> dict:
                     serie = m.group(1)
 
     # -------- EMITENTE --------
-    if emitente_doc is None:
-        cnpjs = re.findall(r"\b\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}\b", texto)
-        if cnpjs:
-            emitente_doc = cnpjs[0]
-            if emitente_doc is not None:
-                idx = texto.find(emitente_doc)
-                if idx != -1:
-                    trecho_antes = texto[max(0, idx-150):idx].strip()
-                    linhas_antes = trecho_antes.split("\n")
-                    for linha in reversed(linhas_antes):
-                        linha_limpa = linha.strip()
-                        if linha_limpa and not any(k in linha_limpa.upper() for k in ["CNPJ", "CPF", "ENDEREÇO", "RAZÃO", "NOTA", "EMITENTE"]):
-                            # Verifica se a linha tem letras suficientemente
-                            alpha_count = sum(c.isalpha() for c in linha_limpa)
-                            if alpha_count >= max(3, len(linha_limpa) // 2):
-                                emitente_nome = linha_limpa
-                                break
-            nome_api = None
-            if emitente_doc is not None:
-                nome_api = consulta_cnpj_api(emitente_doc)
-            if nome_api:
-                # Se o nome atual for diferente do nome API, prevalece o da API
-                if not emitente_nome or emitente_nome.strip().lower() != nome_api.strip().lower():
-                    emitente_nome = nome_api
+    emitente_nome = None
+    if emitente_doc is not None:
+        nome_api = consulta_cnpj_api(emitente_doc)
+        if nome_api:
+            emitente_nome = nome_api
 
 
     # -------- DESTINATÁRIO --------
