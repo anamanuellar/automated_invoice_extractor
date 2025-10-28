@@ -155,10 +155,13 @@ def extrair_capa_de_texto(texto: str) -> dict:
                     for linha in reversed(linhas_antes):
                         linha_limpa = linha.strip()
                         if linha_limpa and not any(k in linha_limpa.upper() for k in ["CNPJ", "CPF", "ENDEREÇO", "RAZÃO", "NOTA", "EMITENTE"]):
-                            emitente_nome = linha_limpa
-                            break
-            # Chamar consulta API somente se emitente_doc não for None e nome não encontrado
-            if emitente_doc is not None and not emitente_nome:
+                            # Verifica se a linha tem letras suficientes para ser uma razão social válida
+                            alpha_count = sum(c.isalpha() for c in linha_limpa)
+                            if alpha_count >= max(3, len(linha_limpa) // 2):
+                                emitente_nome = linha_limpa
+                                break
+            # Chama a API para preencher se nome extraído não for válido ou ausente
+            if not emitente_nome and emitente_doc is not None:
                 nome_api = consulta_cnpj_api(emitente_doc)
                 if nome_api:
                     emitente_nome = nome_api
