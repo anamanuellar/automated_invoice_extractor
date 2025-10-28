@@ -400,62 +400,92 @@ CLASSIFICACAO_CONTABIL = {
     "9": "Outras operações (sem impacto contábil direto)",
 }
 
+# NO ARQUIVO extrator.py (SUBSTITUA A FUNÇÃO COMPLETA)
+
 def classificar_contabilmente(cfop: str) -> str:
     """Retorna a classificação contábil sugerida com base no CFOP."""
-    if not cfop:
-        return "Não identificado"
+    if not cfop: return "Não identificado"
     cfop = str(cfop).strip()
-    if len(cfop) >= 1 and cfop[0] in CLASSIFICACAO_CONTABIL:
+    # Assume que CLASSIFICACAO_CONTABIL existe no escopo global ou está definida acima.
+    if len(cfop) >= 1 and cfop[0] in CLASSIFICACAO_CONTABIL: 
         return CLASSIFICACAO_CONTABIL[cfop[0]]
     return "Não identificado"
-
 
 def enriquecer_itens(itens, uf_destino="BA", regime="simples"):
     """Usa a biblioteca de códigos fiscais para enriquecer os dados dos itens"""
     itens_enriquecidos = []
-
+    
+    # É necessário o 're' importado no topo do extrator.py (já existe)
+    # import re
+    
     for item in itens:
-        cfop = str(item.get("cfop", "")).strip()
-        ncm = str(item.get("ncm", "")).strip()
+        # 1. Extração bruta e segura
+        cfop_bruto = str(item.get("cfop", "")).strip()
+        ncm_bruto = str(item.get("ncm", "")).strip()
         csosn = str(item.get("csosn", item.get("ocst", ""))).strip()
 
-        # ✅ Tenta análise fiscal, mas garante retorno de dict
+        # 2. CONTINGÊNCIA: Tenta extrair CFOP/NCM da descrição se estiverem faltando
+        
+        # Tenta extrair NCM (8 dígitos numéricos)
+        if not ncm_bruto and item.get("descricao"):
+            match_ncm = re.search(r'\b(\d{8})\b', item.get("descricao", ""))
+            if match_ncm:
+                 ncm_bruto = match_ncm.group(1)
+
+        # Tenta extrair CFOP (4 dígitos numéricos)
+        if not cfop_bruto and item.get("descricao"):
+            match_cfop = re.search(r'\b(\d{4})\b', item.get("descricao", ""))
+            # Verifica se o 4 dígitos encontrados são CFOP e não parte de outro código
+            if match_cfop and len(match_cfop.group(1)) == 4:
+                 cfop_bruto = match_cfop.group(1)
+
+        # 3. Análise Fiscal com os códigos mais confiáveis
         try:
-            analise = analisar_nf(cfop, ncm, csosn, uf_destino, regime)
+            # Chama a função de análise fiscal com os valores brutos ou contingenciais
+            # A função analisar_nf deve aceitar strings vazias (ex: "" se o código não foi encontrado)
+            analise = analisar_nf(
+                cfop=cfop_bruto,
+                ncm=ncm_bruto,
+                csosn_ou_cst=csosn, # Assume que a função analisar_nf foi atualizada para receber este nome
+                uf_destino=uf_destino,
+                regime=regime
+            )
             if not isinstance(analise, dict):
                 analise = {}
         except Exception as e:
             if DEBUG:
-                print(f"[DEBUG] Falha ao analisar NF item (CFOP={cfop}, NCM={ncm}): {e}")
+                print(f"[DEBUG] Falha ao analisar NF item (CFOP={cfop_bruto}, NCM={ncm_bruto}): {e}")
             analise = {}
 
-        # ✅ Extrai campos de forma segura
-# ✅ Extrai campos de forma segura
-        
-        # CORREÇÃO: Garante que 'analise' é um dicionário e usa o fallback 'or {}' para 
-        # tratar o caso onde analise.get("cfop_info") retorna None.
+        # 4. Extração segura de info (tratando o caso None de retorno da analise)
         analise_safe = analise if isinstance(analise, dict) else {}
-
         cfop_info = analise_safe.get("cfop_info") or {}
         ncm_info = analise_safe.get("ncm_info") or {}
-
+        
+        # 5. Atualiza o item com os resultados
         item.update({
+            # Usa os códigos (brutos/contingenciais) para salvar de volta no item
+            "cfop": cfop_bruto,
+            "ncm": ncm_bruto,
+            
+            # Descrições e Aplicações Fiscais
             "cfop_desc": cfop_info.get("descricao"),
             "ncm_desc": ncm_info.get("descricao"),
             "icms_aplica": cfop_info.get("icms_aplica"),
             "ipi_aplica": cfop_info.get("ipi_aplica"),
-            "aliquota_icms": analise.get("aliquota_icms") if isinstance(analise, dict) else None,
-            "aliquota_ipi": analise.get("aliquota_ipi") if isinstance(analise, dict) else None,
-            "aliquota_pis": analise.get("aliquota_pis") if isinstance(analise, dict) else None,
-            "aliquota_cofins": analise.get("aliquota_cofins") if isinstance(analise, dict) else None,
-            # 🧾 Classificação contábil automática
-            "classificacao_contabil": classificar_contabilmente(cfop),
+            
+            # Alíquotas (garante float 0.0 se não encontrado)
+            "aliquota_icms": analise.get("aliquota_icms", 0.0),
+            "aliquota_ipi": analise.get("aliquota_ipi", 0.0),
+            "aliquota_pis": analise.get("aliquota_pis", 0.0),
+            "aliquota_cofins": analise.get("aliquota_cofins", 0.0),
+            
+            # Classificação Contábil
+            "classificacao_contabil": classificar_contabilmente(cfop_bruto)
         })
 
         itens_enriquecidos.append(item)
-
     return itens_enriquecidos
-
 
 # ==================== FUNÇÕES DE EXTRAÇÃO (ADAPTADAS) ====================
 
