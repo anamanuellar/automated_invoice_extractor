@@ -8,7 +8,7 @@ import pandas as pd
 from extrator import processar_pdfs
 from ia_simples import (
     classify_expense_hf,
-    detect_anomalies,
+    detect_anomalies_isolation_forest,
     analyze_supplier_risk,
     simple_forecast,
     add_ia_to_streamlit

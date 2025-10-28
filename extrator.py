@@ -226,8 +226,6 @@ def extrair_itens_da_tabela(pdf_page) -> List[Dict[str, Any]]:
 # ==================== FUNÇÕES DE EXTRAÇÃO (ADAPTADAS) ====================
 
 def extrair_capa_de_texto(texto: str) -> dict:
-    # ... (Seu código existente para extrair capa: numero_nf, emitente_doc, etc.)
-    # Apenas para manter o código enxuto, assumimos que esta função não muda
     
     numero_nf: Optional[str] = None
     serie: Optional[str] = None
