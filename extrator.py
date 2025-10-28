@@ -338,30 +338,39 @@ def extrair_itens_da_tabela(pdf_page) -> List[Dict[str, Any]]:
                     except:
                         return None
 
-                # detecta se a linha atual parece incompleta
                 valor_total = to_float(row[8])
                 ncm = str(row[2]).strip()
                 cfop = str(row[4]).strip()
 
-                # se não há valor total ou cfop/ncm → é continuação da linha anterior
-                if (not valor_total and not cfop and not ncm and buffer):
+                # 🧩 Correção de desalinhamento CFOP/NCM
+                if len(cfop) < 4 and re.match(r"\d{7,8}", ncm):
+                    cfop, ncm = ncm[-4:], ncm[:-4]
+
+                # 🧩 Heurística aprimorada para unir linhas quebradas
+                if (
+                    buffer
+                    and not valor_total
+                    and (not cfop or cfop == buffer.get("cfop"))
+                    and len(str(row[1]).strip()) > 0
+                ):
                     buffer["descricao"] += " " + str(row[1]).strip()
                     continue
 
-                # se houver valor total, é uma nova linha completa
+                # Linha nova
                 if buffer:
                     linhas_itens.append(buffer)
 
                 buffer = {
                     "codigo": str(row[0]).strip(),
                     "descricao": str(row[1]).strip(),
-                    "ncm": str(row[2]).strip(),
-                    "cfop": str(row[4]).strip(),
+                    "ncm": ncm,
+                    "cfop": cfop,
                     "unidade": str(row[5]).strip(),
                     "quantidade": to_float(row[6]),
                     "valor_unit": to_float(row[7]),
-                    "valor_total": to_float(row[8]),
+                    "valor_total": valor_total,
                 }
+
 
             # adiciona o último buffer se existir
             if buffer:
