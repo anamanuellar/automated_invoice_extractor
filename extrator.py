@@ -218,9 +218,6 @@ def extrair_capa_de_texto(texto: str) -> dict:
     return resultado
 
 def extrair_texto_ocr(arquivo_pdf, progress_callback=None):
-    import fitz  # PyMuPDF
-    from PIL import Image
-    import io
 
     global EASY_OCR
     if EASY_OCR is None:
