@@ -227,7 +227,9 @@ if uploaded_files:
                 # Download Excel
                 st.subheader("📥 Exportar Resultados")
                 
-                excel_data = exportar_para_excel(df_filtrado)
+                from extrator import exportar_para_excel_com_itens
+                excel_data = exportar_para_excel_com_itens(df_filtrado)
+
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 
                 col1, col2 = st.columns(2)

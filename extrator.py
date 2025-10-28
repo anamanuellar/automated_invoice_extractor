@@ -128,25 +128,25 @@ def consulta_cnpj_api(cnpj: str) -> Optional[str]:
 
 def extrair_itens_da_tabela(pdf_page) -> List[Dict[str, Any]]:
     """
-    Extrai itens de produtos/serviços com colunas separadas.
-    Captura Código, Descrição, NCM, CFOP, Unidade, Quantidade, Valor Unitário e Valor Total.
+    Extrai itens (produtos/serviços) de DANFE.
+    Estratégia híbrida:
+      1. Tenta extrair tabela formal com pdfplumber.
+      2. Se falhar, usa fallback com coordenadas e regex.
     """
     itens_extraidos: List[Dict[str, Any]] = []
 
     try:
-        # Configuração refinada para manter estrutura de tabela
-        table_settings = {
-            "vertical_strategy": "lines",       # usa linhas visuais para separar colunas
-            "horizontal_strategy": "lines",     # idem para linhas horizontais
+        # === 1. Tentativa: tabela estruturada ===
+        tables = pdf_page.extract_tables({
+            "vertical_strategy": "lines",
+            "horizontal_strategy": "lines",
             "intersection_tolerance": 5,
             "snap_tolerance": 3,
-            "join_tolerance": 2,
+            "join_tolerance": 3,
             "text_x_tolerance": 2,
             "text_y_tolerance": 2,
             "edge_min_length": 20
-        }
-
-        tables = pdf_page.extract_tables(table_settings)
+        })
 
         for table in tables:
             if not table or len(table) < 2:
@@ -154,21 +154,17 @@ def extrair_itens_da_tabela(pdf_page) -> List[Dict[str, Any]]:
 
             header = [str(c).upper().strip() for c in table[0] if c]
             if not any("DESCRI" in h or "PRODUTO" in h for h in header):
-                continue  # garante que é a tabela de itens
+                continue
 
             for row in table[1:]:
-                # Evita linhas vazias
                 if not any(row):
                     continue
+                row = (row + [""] * 12)[:12]
 
-                # Normaliza o tamanho (preenche até 10 colunas)
-                row = (row + [""] * 10)[:10]
-
-                # Tenta converter campos numéricos
                 def num(v):
-                    v = str(v).replace(".", "").replace(",", ".").strip()
+                    s = str(v).replace(".", "").replace(",", ".").strip()
                     try:
-                        return float(v)
+                        return float(s)
                     except:
                         return None
 
@@ -183,35 +179,51 @@ def extrair_itens_da_tabela(pdf_page) -> List[Dict[str, Any]]:
                     "valor_total": num(row[8]),
                 }
 
-                # Mantém apenas linhas com descrição e valor
                 if item["descricao"] and item["valor_total"]:
                     itens_extraidos.append(item)
 
-        # Caso não ache tabela formal, tenta fallback textual
+        # === 2. Fallback: texto posicional (caso sem bordas) ===
         if not itens_extraidos:
-            text = pdf_page.extract_text() or ""
-            linhas = text.split("\n")
-            for ln in linhas:
-                if re.search(r"\d{1,3}(?:[.,]\d{3})*[.,]\d{2}", ln):
-                    if len(ln.split()) > 5:
-                        partes = ln.strip().split()
-                        descricao = " ".join(partes[1:-3])
-                        valor_total = moeda_to_float(partes[-1])
-                        if valor_total:
+            words = pdf_page.extract_words()
+            linhas = {}
+            for w in words:
+                y = round(w["top"] / 5) * 5
+                linhas.setdefault(y, []).append(w)
+
+            for _, grupo in sorted(linhas.items()):
+                linha_txt = " ".join([w["text"] for w in grupo])
+                if len(linha_txt) < 10:
+                    continue
+                if any(k in linha_txt.upper() for k in ["CÓDIGO", "PRODUTO", "DESCRIÇÃO", "TOTAL", "ICMS", "IPI"]):
+                    continue
+
+                m_valor = re.search(r"(\d{1,3}(?:[.,]\d{3})*[.,]\d{2,3})", linha_txt)
+                if m_valor:
+                    valor_total = moeda_to_float(m_valor.group(1))
+                    if valor_total and valor_total > 0:
+                        partes = linha_txt.split(m_valor.group(1))
+                        descricao = partes[0].strip()
+                        codigo = None
+                        match_cod = re.match(r"^\d{1,5}", descricao)
+                        if match_cod:
+                            codigo = match_cod.group(0)
+                            descricao = descricao[len(codigo):].strip()
+
+                        if len(descricao) > 4:
                             itens_extraidos.append({
-                                "codigo": partes[0],
+                                "codigo": codigo,
                                 "descricao": descricao,
-                                "valor_total": valor_total
+                                "valor_total": round(valor_total, 2)
                             })
 
         if DEBUG:
-            print(f"[DEBUG] Página {pdf_page.page_number}: {len(itens_extraidos)} itens com colunas capturados")
+            print(f"[DEBUG] Página {pdf_page.page_number}: {len(itens_extraidos)} itens encontrados")
 
         return itens_extraidos
 
     except Exception as e:
         if DEBUG:
-            print(f"[DEBUG] Erro em extrair_itens_da_tabela: {e}")
+            print(f"[DEBUG] Erro na extração híbrida de itens: {e}")
         return []
 
 
@@ -489,5 +501,33 @@ def exportar_para_excel(df: pd.DataFrame) -> bytes:
     df_export = df.drop(columns=['itens_nf'], errors='ignore')
     output = io.BytesIO()
     df_export.to_excel(output, index=False, engine='openpyxl')
+    output.seek(0)
+    return output.getvalue()
+
+def exportar_para_excel_com_itens(df: pd.DataFrame) -> bytes:
+    """
+    Exporta as notas e os itens detalhados em abas separadas.
+    """
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        # Aba principal
+        df.drop(columns=["itens_nf"], errors="ignore").to_excel(writer, sheet_name="Notas Fiscais", index=False)
+
+        # Aba de itens detalhados
+        todas_linhas = []
+        for _, row in df.iterrows():
+            if isinstance(row.get("itens_nf"), list):
+                for item in row["itens_nf"]:
+                    todas_linhas.append({
+                        "arquivo": row["arquivo"],
+                        "numero_nf": row.get("numero_nf"),
+                        "emitente_nome": row.get("emitente_nome"),
+                        "data_emissao": row.get("data_emissao"),
+                        "valor_nf": row.get("valor_total_num"),
+                        **item
+                    })
+        if todas_linhas:
+            pd.DataFrame(todas_linhas).to_excel(writer, sheet_name="Itens Detalhados", index=False)
+
     output.seek(0)
     return output.getvalue()
