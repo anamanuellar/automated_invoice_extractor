@@ -1,296 +1,323 @@
-import re
-import PyPDF2
-from pdf2image import convert_from_path
-import pytesseract
-from PIL import Image
+import os, io, re, requests, time
+from pathlib import Path
+from datetime import datetime
+from typing import Any, cast
+
 import pdfplumber
 import pandas as pd
-from typing import Dict, Optional, Tuple
 
-class ExtractorNF:
-    """Extrator robusto de Notas Fiscais com suporte a múltiplos formatos"""
+# =============== CONFIG ===============
+DEBUG = True
+CNPJ_CACHE: dict[str, dict] = {}
+
+# =============== REGEX ===============
+RE_MOEDA = re.compile(r"R?\$?\s*(\d{1,3}(?:\.\d{3})*,\d{2})")
+RE_DATA  = re.compile(r"\b\d{2}/\d{2}/\d{4}\b")
+
+def somente_digitos(s: str | Any) -> str:
+    s_str = str(s) if s is not None else ""
+    return re.sub(r"\D", "", s_str or "")
+
+def fmt_cnpj(cnpj_digits: str) -> str:
+    d = somente_digitos(cnpj_digits)
+    if len(d) != 14: return cnpj_digits
+    return f"{d[0:2]}.{d[2:5]}.{d[5:8]}/{d[8:12]}-{d[12:14]}"
+
+def achar_doc_em_linha(s: str) -> str | None:
+    m = re.search(r"\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}", s)
+    if m: return m.group(0)
+    m = re.search(r"\b\d{14}\b", s)
+    if m: return fmt_cnpj(m.group(0))
+    return None
+
+def moeda_to_float(s: str | None) -> float | None:
+    if not s: return None
+    try: return float(s.replace(".", "").replace(",", "."))
+    except: return None
+
+def pick_last_money_on_same_or_next_lines(linhas, idx, max_ahead=6):
+    def pick(line):
+        vals = RE_MOEDA.findall(line)
+        vals = [v for v in vals if v != "0,00"]
+        return vals[-1] if vals else None
+    v = pick(linhas[idx])
+    if v: return v
+    for j in range(1, max_ahead + 1):
+        k = idx + j
+        if k >= len(linhas): break
+        v = pick(linhas[k])
+        if v: return v
+    return None
+
+# =============== ROTAÇÃO ===============
+def detectar_rotacao(texto: str) -> bool:
+    """Detecta se o PDF tem partes rotacionadas"""
+    # Se tem MAIS padrões invertidos que normais, considerar rotacionado
+    padroes_invertidos = ["e-FN", ".odal", "adacidni"]
+    padroes_normais = ["NF-e", "valor", "indicada"]
     
-    def __init__(self):
-        self.numero_nf = None
-        self.serie = None
-        self.data_emissao = None
-        self.cnpj_emitente = None
-        self.cnpj_destinatario = None
-        self.valor_total = None
-        
-    def detectar_rotacao(self, texto: str) -> bool:
-        """
-        Detecta se o PDF está rotacionado verificando padrões invertidos
-        Ex: "e-FN" em vez de "NF-e", ".odal" em vez de "valor"
-        """
-        # Padrões que indicam rotação
-        padroes_invertidos = [
-            r"e-FN",  # NF-e invertido
-            r"\.odal",  # valor invertido
-            r"oãçitsid",  # distribuição invertido
-            r"etneme",  # emitente invertido
-        ]
-        
-        for padrao in padroes_invertidos:
-            if re.search(padrao, texto):
-                return True
-        return False
+    inv_count = sum(1 for p in padroes_invertidos if p in texto)
+    norm_count = sum(1 for p in padroes_normais if p in texto)
     
-    def corrigir_rotacao_texto(self, texto: str) -> str:
-        """Inverte o texto se detectar rotação"""
-        linhas = texto.split('\n')
-        linhas_invertidas = [linha[::-1] for linha in linhas]
-        return '\n'.join(linhas_invertidas)
-    
-    def corrigir_rotacao_imagem(self, imagem: Image.Image) -> Image.Image:
-        """Rotaciona imagem 180 graus se detectar padrões invertidos"""
-        # Extrair texto para verificar
-        texto_original = pytesseract.image_to_string(imagem, lang='por')
-        
-        if self.detectar_rotacao(texto_original):
-            print("🔄 Rotação detectada! Corrigindo imagem...")
-            return imagem.rotate(180, expand=False)
-        
-        return imagem
-    
-    def extrair_numero_nf_primeira_linha(self, linhas: list) -> Optional[str]:
-        """
-        Extrai número da NF mesmo que esteja em primeira linha
-        Suporta formatos:
-        - Nº.: 054.013.637
-        - Nº: 054013637
-        - N°: 637
-        """
-        for ln in linhas[:5]:  # Procura nas primeiras 5 linhas
-            # Padrão 1: "Nº.: XXX.XXX.XXX" (com pontos)
-            m = re.search(r"N[°ºO]\.\s*[:\-]?\s*(\d{3}\.\d{3}\.\d{3,6})", ln)
-            if m:
-                cand = m.group(1).replace(".", "")
-                try:
-                    val = int(cand)
-                    numero = str(val % 1000000).lstrip('0') or "0"
-                    print(f"✅ Número encontrado na primeira linha: {numero}")
-                    return numero
-                except:
-                    pass
-            
-            # Padrão 2: "Nº XXX XXX XXX" (com espaços)
-            m = re.search(r"N[°ºO]\s*(\d{3}\s+\d{3}\s+\d{3,6})", ln)
-            if m:
-                cand = m.group(1).replace(" ", "")
-                try:
-                    val = int(cand)
-                    numero = str(val % 1000000).lstrip('0') or "0"
-                    print(f"✅ Número encontrado na primeira linha: {numero}")
-                    return numero
-                except:
-                    pass
-            
-            # Padrão 3: Simples "Nº 637"
-            m = re.search(r"N[°ºO]\s*[:\-]?\s*(\d{1,6})(?:\D|$)", ln)
-            if m:
-                cand = m.group(1)
-                try:
-                    val = int(cand)
-                    if 1 <= val <= 999999:
-                        print(f"✅ Número encontrado na primeira linha: {val}")
-                        return str(val)
-                except:
-                    pass
-        
+    # Se tem mais padrões invertidos OU tem muitos padrões invertidos, considerar rotação
+    if inv_count > norm_count or inv_count >= 2:
+        return True
+    return False
+
+# =============== CNPJ ===============
+def calcula_dvs_cnpj(base12: str) -> tuple[int,int]:
+    nums = [int(x) for x in base12]
+    pesos1 = [5,4,3,2,9,8,7,6,5,4,3,2]
+    s1 = sum(n*p for n,p in zip(nums, pesos1))
+    r1 = s1 % 11
+    dv1 = 0 if r1 < 2 else 11 - r1
+    pesos2 = [6,5,4,3,2,9,8,7,6,5,4,3,2]
+    nums2 = nums + [dv1]
+    s2 = sum(n*p for n,p in zip(nums2, pesos2))
+    r2 = s2 % 11
+    dv2 = 0 if r2 < 2 else 11 - r2
+    return dv1, dv2
+
+def cnpj_raiz_0001(cnpj_digits: str) -> str:
+    d = somente_digitos(cnpj_digits)
+    if len(d) != 14:
+        return d
+    base8 = d[:8]
+    base12 = base8 + "0001"
+    dv1, dv2 = calcula_dvs_cnpj(base12)
+    return base12 + str(dv1) + str(dv2)
+
+def _try_brasilapi(cnpj14: str) -> dict | None:
+    try:
+        url = f"https://brasilapi.com.br/api/cnpj/v1/{cnpj14}"
+        r = requests.get(url, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            razao = data.get("razao_social") or data.get("nome_fantasia")
+            if razao:
+                return {"nome": razao, "fonte": "brasilapi"}
+    except:
+        pass
+    return None
+
+def consulta_nome_por_cnpj(cnpj_raw: str, usar_raiz=True) -> str | None:
+    if not cnpj_raw:
         return None
-    
-    def extrair_serie_primeira_linha(self, linhas: list) -> Optional[str]:
-        """Extrai série mesmo que esteja nas primeiras linhas"""
-        for ln in linhas[:5]:
-            m = re.search(r"S[ÉE]RIE\s*[:\-]?\s*(\d+)", ln, re.I)
-            if m:
-                try:
-                    val = int(m.group(1))
-                    if 0 <= val <= 999:
-                        print(f"✅ Série encontrada: {val}")
-                        return str(val)
-                except:
-                    pass
+    d = somente_digitos(cnpj_raw)
+    if len(d) != 14:
         return None
-    
-    def extrair_de_pdf(self, caminho_pdf: str) -> Dict:
-        """Extrai informações de PDF com tratamento de rotação"""
-        dados = {}
-        
-        try:
-            # Tentar com pdfplumber primeiro
-            with pdfplumber.open(caminho_pdf) as pdf:
-                pagina = pdf.pages[0]
-                texto_pdfplumber = pagina.extract_text()
-                
-                # Verificar rotação
-                if self.detectar_rotacao(texto_pdfplumber):
-                    print(f"⚠️  Rotação detectada no PDF: {caminho_pdf}")
-                    # Converter para imagem, corrigir e reextrair
-                    imagens = convert_from_path(caminho_pdf, first_page=1, last_page=1)
-                    imagem_corrigida = self.corrigir_rotacao_imagem(imagens[0])
-                    texto_pdfplumber = pytesseract.image_to_string(imagem_corrigida, lang='por')
-                
-                linhas = texto_pdfplumber.split('\n')
-                
-                # Extrair campos
-                self.numero_nf = self.extrair_numero_nf_primeira_linha(linhas) or self._extrair_numero_padrao(linhas)
-                self.serie = self.extrair_serie_primeira_linha(linhas) or self._extrair_serie_padrao(linhas)
-                
-                dados['numero_nf'] = self.numero_nf
-                dados['serie'] = self.serie
-                dados['emitente_nome'] = self._extrair_nome_emitente(linhas)
-                dados['emitente_doc'] = self._extrair_cnpj_emitente(linhas)
-                dados['dest_nome'] = self._extrair_nome_destinatario(linhas)
-                dados['dest_doc'] = self._extrair_cnpj_destinatario(linhas)
-                dados['valor_total_num'] = self._extrair_valor_total(linhas)
-                dados['data_emissao'] = self._extrair_data(linhas)
-                
-        except Exception as e:
-            print(f"❌ Erro ao extrair de {caminho_pdf}: {str(e)}")
-            dados['erro'] = str(e)
-        
-        return dados
-    
-    def _extrair_numero_padrao(self, linhas: list) -> Optional[str]:
-        """Extrai número usando padrão original (alternativo)"""
-        for ln in linhas:
-            m = re.search(r"N[°ºO][^:\d]*[:\-]?\s*(\d+(?:\.\d+)*)", ln)
-            if m:
-                cand = m.group(1).replace(".", "")
-                try:
-                    val = int(cand)
-                    if 1 <= val <= 999999:
-                        return str(val)
-                except:
-                    pass
-        return None
-    
-    def _extrair_serie_padrao(self, linhas: list) -> Optional[str]:
-        """Extrai série usando padrão original (alternativo)"""
-        for ln in linhas:
-            m = re.search(r"SÉRIE.*?(\d+)", ln, re.I)
-            if m:
-                return m.group(1)
-        return None
-    
-    def _extrair_nome_emitente(self, linhas: list) -> Optional[str]:
-        """Extrai nome do emitente"""
-        for i, ln in enumerate(linhas):
-            if "EMITENTE" in ln.upper() or "FORNECEDOR" in ln.upper():
-                # Nome geralmente está na próxima linha após "EMITENTE"
-                if i + 1 < len(linhas):
-                    nome_linha = linhas[i + 1].strip()
-                    if nome_linha and nome_linha.upper() != "CNPJ" and len(nome_linha) > 3:
-                        return nome_linha
-                # Ou na mesma linha após "EMITENTE:"
-                parts = ln.split(':')
-                if len(parts) > 1:
-                    nome = parts[1].strip()
-                    if nome and len(nome) > 3:
-                        return nome
-        return None
-    
-    def _extrair_cnpj_emitente(self, linhas: list) -> Optional[str]:
-        """Extrai CNPJ do emitente"""
-        for i, ln in enumerate(linhas):
-            if "EMITENTE" in ln.upper() or "FORNECEDOR" in ln.upper():
-                # Procura nos próximos 5 linhas
-                for j in range(i+1, min(i+6, len(linhas))):
-                    m = re.search(r"(\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2})", linhas[j])
-                    if m:
-                        return m.group(1)
-        return None
-    
-    def _extrair_nome_destinatario(self, linhas: list) -> Optional[str]:
-        """Extrai nome do destinatário"""
-        for i, ln in enumerate(linhas):
-            if "DESTINAT" in ln.upper() or "CLIENTE" in ln.upper() or "PARA:" in ln.upper():
-                # Nome geralmente está na próxima linha após "DESTINATÁRIO"
-                if i + 1 < len(linhas):
-                    nome_linha = linhas[i + 1].strip()
-                    if nome_linha and nome_linha.upper() != "CNPJ" and len(nome_linha) > 3:
-                        return nome_linha
-                # Ou na mesma linha após "DESTINATÁRIO:"
-                parts = ln.split(':')
-                if len(parts) > 1:
-                    nome = parts[1].strip()
-                    if nome and len(nome) > 3:
-                        return nome
-        return None
-    
-    def _extrair_cnpj_destinatario(self, linhas: list) -> Optional[str]:
-        """Extrai CNPJ do destinatário"""
-        for i, ln in enumerate(linhas):
-            if "DESTINAT" in ln.upper() or "CLIENTE" in ln.upper() or "PARA:" in ln.upper():
-                for j in range(i+1, min(i+6, len(linhas))):
-                    m = re.search(r"(\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2})", linhas[j])
-                    if m:
-                        return m.group(1)
-        return None
-    
-    def _extrair_valor_total(self, linhas: list) -> Optional[float]:
-        """Extrai valor total da NF"""
-        for ln in linhas:
-            if "VALOR TOTAL" in ln.upper() or "TOTAL" in ln.upper():
-                m = re.search(r"R\$?\s*([\d.,]+)", ln)
-                if m:
-                    valor_str = m.group(1).replace(".", "").replace(",", ".")
-                    try:
-                        return float(valor_str)
-                    except:
-                        pass
-        return None
-    
-    def _extrair_data(self, linhas: list) -> Optional[str]:
-        """Extrai data de emissão"""
-        # Padrão dd/mm/yyyy
-        for ln in linhas[:20]:
-            m = re.search(r"(\d{2})/(\d{2})/(\d{4})", ln)
-            if m:
-                return f"{m.group(1)}/{m.group(2)}/{m.group(3)}"
-        return None
+    if usar_raiz:
+        d = cnpj_raiz_0001(d)
+    if d in CNPJ_CACHE:
+        return CNPJ_CACHE[d].get("nome")
+    data = _try_brasilapi(d)
+    if data and data.get("nome"):
+        CNPJ_CACHE[d] = data
+        return data.get("nome")
+    time.sleep(0.1)
+    CNPJ_CACHE[d] = {"nome": None, "fonte": None}
+    return None
 
 
-def processar_pdfs(pdf_paths: list, progress_callback=None) -> pd.DataFrame:
-    """Processa múltiplos PDFs e retorna DataFrame"""
-    extrator = ExtractorNF()
-    resultados = []
+def extrair_emitente_do_filename(nome_arquivo: str) -> tuple[str | None, str | None]:
+    """Extrai nome do emitente do nome do arquivo"""
+    # Remove extensão
+    nome = nome_arquivo.replace('.pdf', '')
     
-    for i, pdf_path in enumerate(pdf_paths):
+    # Padrão: "DANFE <NOME> - Nº <NUM>" ou "DANFE Nº <NUM> - <NOME>"
+    # Extrai tudo entre "DANFE" e "- nº" ou "- Nº"
+    
+    m = re.search(r"DANFE\s+(?:nº|Nº)?\s*(\d+)?\s*-?\s*(.+?)(?:\s*-\s*nº|\s*-\s*Nº|\s*-\s*–)?\s*\d*$", nome, re.I)
+    if m and m.lastindex and m.lastindex >= 2:
+        emitente = m.group(2).strip()
+        if emitente:
+            return emitente, None
+    
+    # Padrão alternativo: "NF <NOME> - Nº <NUM>"
+    m = re.search(r"NF\s+(.+?)\s*-\s*Nº\s*\d+", nome, re.I)
+    if m:
+        emitente = m.group(1).strip()
+        if emitente:
+            return emitente, None
+    
+    return None, None
+
+
+def extrair_capa_de_texto(texto: str) -> dict[str, Any]:
+    """Extrai dados usando regex robustos (inspirado em parse_danfe_text)"""
+    
+    if detectar_rotacao(texto):
+        if DEBUG:
+            print("  🔄 Rotação detectada, invertendo texto...")
+        texto = texto[::-1]
+    
+    # Normalizar: remover acentos e múltiplos espaços
+    texto_norm = re.sub(r"\s+", " ", texto)
+    
+    numero_nf: str | None = None
+    serie: str | None = None
+    emitente_nome: str | None = None
+    emitente_doc: str | None = None
+    dest_nome: str | None = None
+    dest_doc: str | None = None
+    data_emissao: str | None = None
+    valor_total: str | None = None
+
+    # ========== NF e Série ==========
+    m = re.search(r"N[oº]?\s*:?\s*(\d+)\s+S[ée]rie\s*:?\s*(\d+)", texto_norm, re.I)
+    if m:
+        numero_nf = m.group(1)
+        serie = m.group(2)
+        if DEBUG:
+            print(f"    ✓ NF: {numero_nf}, Série: {serie}")
+    
+    # ========== Data ==========
+    m = re.search(r"Emiss[ãa]o[^0-9]*(\d{2}/\d{2}/\d{4})", texto_norm, re.I)
+    if m:
+        data_emissao = m.group(1)
+        if DEBUG:
+            print(f"    ✓ Data: {data_emissao}")
+    
+    # ========== Valor Total ==========
+    m = re.search(r"Valor\s+Total(?:\s+da\s+Nota)?\s*[:\-]?\s*R\$?\s*(\d{1,3}(?:\.\d{3})*,\d{2})", texto_norm, re.I)
+    if m:
+        valor_total = m.group(1)
+        if DEBUG:
+            print(f"    ✓ Valor: {valor_total}")
+    
+    # ========== Emitente Nome ==========
+    m = re.search(r"(?:Emitente|Remetente)\s*[:\-]?\s*([^\n]{5,80}?)(?:\n|$)", texto_norm, re.I)
+    if m:
+        emitente_nome = m.group(1).strip()
+        if DEBUG and emitente_nome:
+            print(f"    ✓ Nome Emit: {emitente_nome[:50]}")
+    
+    # ========== CNPJ/CPF (prioriza emitente depois destinatário) ==========
+    docs = re.findall(r"(?:CNPJ|CPF)[^0-9]*([0-9\.\-/]{11,18})", texto_norm, re.I)
+    docs_limpos = [somente_digitos(d) for d in docs]
+    
+    if docs_limpos:
+        emitente_doc = docs_limpos[0]
+        if len(docs_limpos) > 1:
+            dest_doc = docs_limpos[1]
+        if DEBUG and emitente_doc:
+            print(f"    ✓ CNPJ Emit: {emitente_doc}")
+        if DEBUG and dest_doc:
+            print(f"    ✓ CNPJ Dest: {dest_doc}")
+    
+    # ========== Destinatário Nome ==========
+    m = re.search(r"(?:Destinat[aá]rio|Consumidor)\s*[:\-]?\s*([^\n]{3,80}?)(?:\n|$)", texto_norm, re.I)
+    if m:
+        dest_nome = m.group(1).strip()
+        if DEBUG and dest_nome:
+            print(f"    ✓ Nome Dest: {dest_nome[:50]}")
+
+    resultado = cast(dict[str, Any], {
+        "numero_nf": numero_nf,
+        "serie": serie,
+        "emitente_doc": emitente_doc,
+        "emitente_nome": emitente_nome,
+        "dest_doc": dest_doc,
+        "dest_nome": dest_nome,
+        "data_emissao": data_emissao,
+        "valor_total": valor_total,
+        "valor_total_num": moeda_to_float(valor_total),
+    })
+    
+    return resultado
+
+
+def extrair_capa_de_pdf(arquivo_pdf: str, progress_callback=None) -> dict:
+    """Extrai informações da capa do PDF"""
+    nome_arquivo = Path(arquivo_pdf).name
+    
+    try:
+        with pdfplumber.open(arquivo_pdf) as pdf:
+            for page in pdf.pages:
+                txt = page.extract_text() or ""
+                if txt and len(txt.strip()) > 100:
+                    dados = extrair_capa_de_texto(txt)
+                    
+                    if any([dados["numero_nf"], dados["emitente_doc"], dados["dest_doc"], dados["valor_total"]]):
+                        if progress_callback:
+                            progress_callback(f"✅ {nome_arquivo}")
+                        return {"arquivo": nome_arquivo, **dados}
+    except Exception as e:
         if progress_callback:
-            progress_callback(f"Processando: {pdf_path}")
-        
-        dados = extrator.extrair_de_pdf(pdf_path)
-        dados['arquivo'] = pdf_path
-        resultados.append(dados)
+            progress_callback(f"❌ {str(e)}")
     
-    return pd.DataFrame(resultados)
+    vazio = cast(dict[str, Any], {k: None for k in [
+        "numero_nf","serie","emitente_doc","emitente_nome",
+        "dest_doc","dest_nome","data_emissao","valor_total","valor_total_num"
+    ]})
+    
+    return {"arquivo": nome_arquivo, **vazio}
 
 
-# Exemplo de uso
+def enriquecer_com_cnpj(df: pd.DataFrame, progress_callback=None) -> pd.DataFrame:
+    """Enriquece dados com nomes dos CNPJs"""
+    for idx in df.index:
+        em_doc = df.loc[idx, "emitente_doc"]
+        if em_doc and isinstance(em_doc, str) and not df.loc[idx, "emitente_nome"]:
+            nome_cnpj = consulta_nome_por_cnpj(em_doc, usar_raiz=True)
+            if nome_cnpj:
+                if progress_callback:
+                    progress_callback(f"✓ Emit: {nome_cnpj}")
+                df.loc[idx, "emitente_nome"] = nome_cnpj
+
+        de_doc = df.loc[idx, "dest_doc"]
+        if de_doc and isinstance(de_doc, str) and not df.loc[idx, "dest_nome"]:
+            nome_cnpj = consulta_nome_por_cnpj(de_doc, usar_raiz=True)
+            if nome_cnpj:
+                if progress_callback:
+                    progress_callback(f"✓ Dest: {nome_cnpj}")
+                df.loc[idx, "dest_nome"] = nome_cnpj
+    
+    return df
+
+
+def processar_pdfs(arquivos_pdf: list, progress_callback=None) -> pd.DataFrame:
+    """Processa lista de PDFs"""
+    regs = []
+    for i, pdf_path in enumerate(arquivos_pdf, 1):
+        if progress_callback:
+            progress_callback(f"[{i}/{len(arquivos_pdf)}] {Path(pdf_path).name}")
+        regs.append(extrair_capa_de_pdf(pdf_path, progress_callback))
+
+    df = pd.DataFrame(regs).drop_duplicates(subset=["arquivo"], keep="first")
+
+    try:
+        df["_ordem"] = pd.to_datetime(df["data_emissao"], format="%d/%m/%Y", errors="coerce")
+        df = df.sort_values(by=["_ordem","arquivo"], na_position="last").drop(columns=["_ordem"])
+    except:
+        pass
+
+    if progress_callback:
+        progress_callback("🔍 Enriquecendo...")
+    df = enriquecer_com_cnpj(df, progress_callback)
+    
+    return df
+
+
+# =============== TESTE =================
 if __name__ == "__main__":
-    extrator = ExtractorNF()
+    print("🧪 Testando extrator...\n")
     
-    # Processar PDFs
     pdfs = [
-        "NF_EBAZAR.pdf",
-        "NF_DELL.pdf",
+        "/mnt/user-data/uploads/DANFE_DELL_COMPUTADORES_DO_BRASIL_LTDA_-_nº_7686026.pdf",
+        "/mnt/user-data/uploads/DANFE_EBAZAR_-_Nº_54013637.pdf",
     ]
     
-    resultados = []
-    for pdf in pdfs:
-        print(f"\n📄 Processando: {pdf}")
-        print("-" * 50)
-        dados = extrator.extrair_de_pdf(pdf)
-        dados['arquivo'] = pdf
-        resultados.append(dados)
-        
-        for chave, valor in dados.items():
-            print(f"  {chave}: {valor}")
+    def callback(msg):
+        print(f"  {msg}")
     
-    # Salvar resultados
-    df = pd.DataFrame(resultados)
-    df.to_csv("resultados_extracao.csv", index=False)
-    print("\n✅ Resultados salvos em 'resultados_extracao.csv'")
+    df = processar_pdfs(pdfs, callback)
+    
+    print("\n" + "="*100)
+    print("RESULTADOS:")
+    print("="*100)
+    print(df.to_string())
+    
+    # Salvar em CSV
+    df.to_csv("/mnt/user-data/outputs/resultados_finais.csv", index=False)
+    print("\n✅ Salvo em: /mnt/user-data/outputs/resultados_finais.csv")
