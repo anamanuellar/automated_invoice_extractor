@@ -147,7 +147,6 @@ def extrair_capa_de_texto(texto: str) -> dict:
         cnpjs = re.findall(r"\b\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}\b", texto)
         if cnpjs:
             emitente_doc = cnpjs[0]
-            # Proteção contra passar None para find (que requer str)
             if emitente_doc is not None:
                 idx = texto.find(emitente_doc)
                 if idx != -1:
@@ -158,8 +157,7 @@ def extrair_capa_de_texto(texto: str) -> dict:
                         if linha_limpa and not any(k in linha_limpa.upper() for k in ["CNPJ", "CPF", "ENDEREÇO", "RAZÃO", "NOTA", "EMITENTE"]):
                             emitente_nome = linha_limpa
                             break
-        # Enriquecer nome consultando API se nome não foi obtido no texto
-            # Proteção para garantir que emitente_doc não é None antes de passar para consulta_cnpj_api
+            # Chamar consulta API somente se emitente_doc não for None e nome não encontrado
             if emitente_doc is not None and not emitente_nome:
                 nome_api = consulta_cnpj_api(emitente_doc)
                 if nome_api:
