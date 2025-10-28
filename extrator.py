@@ -119,7 +119,31 @@ def consulta_nome_por_cnpj(cnpj_raw: str, usar_raiz=True) -> str | None:
     return None
 
 
-def extrair_capa_de_texto(texto: str) -> dict[str, Any]:
+def extrair_emitente_do_filename(nome_arquivo: str) -> tuple[str | None, str | None]:
+    """Extrai nome do emitente do nome do arquivo"""
+    # Remove extensão
+    nome = nome_arquivo.replace('.pdf', '')
+    
+    # Padrão: "DANFE <NOME> - Nº <NUM>" ou "DANFE Nº <NUM> - <NOME>"
+    # Extrai tudo entre "DANFE" e "- nº" ou "- Nº"
+    
+    m = re.search(r"DANFE\s+(?:nº|Nº)?\s*(\d+)?\s*-?\s*(.+?)(?:\s*-\s*nº|\s*-\s*Nº|\s*-\s*–)?\s*\d*$", nome, re.I)
+    if m and m.lastindex and m.lastindex >= 2:
+        emitente = m.group(2).strip()
+        if emitente:
+            return emitente, None
+    
+    # Padrão alternativo: "NF <NOME> - Nº <NUM>"
+    m = re.search(r"NF\s+(.+?)\s*-\s*Nº\s*\d+", nome, re.I)
+    if m:
+        emitente = m.group(1).strip()
+        if emitente:
+            return emitente, None
+    
+    return None, None
+
+
+def extrair_capa_de_texto(texto: str) -> dict:
     """Extrai dados da capa com reconhecimento de seções"""
     
     # Se detectar rotação, inverter TODO o texto ANTES de dividir
@@ -190,15 +214,18 @@ def extrair_capa_de_texto(texto: str) -> dict[str, Any]:
     # ========== PASSO 2: EMITENTE ==========
     for i, ln in enumerate(linhas):
         if "IDENTIFICAÇÃO DO EMITENTE" in ln.upper():
-            for j in range(i + 1, min(i + 12, len(linhas))):
+            # Próximas linhas contêm nome e CNPJ do emitente
+            for j in range(i + 1, min(i + 15, len(linhas))):
                 linha = linhas[j].strip()
                 if not linha:
                     continue
                 linha_up = linha.upper()
                 
-                if any(x in linha_up for x in ["DANFE", "DOCUMENTO", "NOTA", "ELETRÔNICA", "ENTRADA", "SAÍDA"]):
-                    continue
+                # Pular linhas que não são dados do emitente
+                if any(x in linha_up for x in ["DANFE", "DOCUMENTO", "NOTA", "ELETRÔNICA", "ENTRADA", "SAÍDA", "---", "CHAVE"]):
+                    break
                 
+                # Procurar CNPJ/CPF
                 doc = achar_doc_em_linha(linha)
                 if doc and len(somente_digitos(doc)) == 14:
                     emitente_doc = doc
@@ -206,11 +233,12 @@ def extrair_capa_de_texto(texto: str) -> dict[str, Any]:
                         print(f"    ✓ CNPJ Emit: {emitente_doc}")
                     break
                 
+                # Primeira linha não-vazia é o nome (e não contém caracteres de endereço)
                 if len(linha) > 5 and not emitente_nome:
-                    if "CEP" not in linha_up and "FONE" not in linha_up:
+                    if not any(x in linha_up for x in ["CEP:", "FONE:", "RUA", "AV", "AVENIDA", "TRAVESSA", "ESTRADA"]):
                         emitente_nome = linha
                         if DEBUG:
-                            print(f"    ✓ Nome Emit: {emitente_nome[:40]}")
+                            print(f"    ✓ Nome Emit: {emitente_nome[:50]}")
             break
 
     # ========== PASSO 3: DESTINATÁRIO ==========
