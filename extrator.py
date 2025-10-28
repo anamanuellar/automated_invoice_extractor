@@ -164,8 +164,8 @@ def extrair_capa_de_texto(texto: str) -> dict:
             if emitente_doc is not None:
                 nome_api = consulta_cnpj_api(emitente_doc)
             if nome_api:
-                # Se nome extraído está vazio ou diferente do nome da API, prevalece nome da API
-                if not emitente_nome or nome_api.strip().lower() != (emitente_nome or "").strip().lower():
+                # Se o nome atual for diferente do nome API, prevalece o da API
+                if not emitente_nome or emitente_nome.strip().lower() != nome_api.strip().lower():
                     emitente_nome = nome_api
 
 
