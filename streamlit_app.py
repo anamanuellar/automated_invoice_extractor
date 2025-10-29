@@ -17,6 +17,7 @@ from ia_simples import (
 import io
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
+from agente_financeiro import get_model_provider, analisar_contexto_ia
 
 # =============== FUNÇÃO AUXILIAR ===============
 def exportar_para_excel(df) -> bytes:
@@ -278,6 +279,13 @@ if uploaded_files:
                         use_container_width=True
                     )
 
+                st.divider()
+                st.subheader("🧭 Agente Financeiro Inteligente")
+
+                provider = get_model_provider()
+                if st.button("Executar Análise de IA"):
+                    analisar_contexto_ia(df_filtrado, provider)
+                    
                 # Estatísticas avançadas
                 st.divider()
                 st.subheader("📈 Análise")

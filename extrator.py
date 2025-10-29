@@ -292,8 +292,6 @@ def detectar_regime_tributario(dest_doc: Optional[str], emitente_doc: Optional[s
 
 
 
-
-
 def extrair_itens_da_tabela(pdf_page) -> List[Dict[str, Any]]:
     """
     Extrai itens (produtos/serviços) de DANFE.
