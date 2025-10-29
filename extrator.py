@@ -291,18 +291,16 @@ def detectar_regime_tributario(dest_doc: Optional[str], emitente_doc: Optional[s
 
 def extrair_itens_da_tabela(pdf_page) -> List[Dict[str, Any]]:
     """
-    Extrai itens (produtos/serviços) de DANFE com heurística de agrupamento e detecção automática de colunas.
-
-    Estratégia:
-      1️⃣ Usa pdfplumber para extrair tabelas estruturadas.
-      2️⃣ Detecta dinamicamente CFOP, NCM e Valor Total (sem depender de posição fixa).
-      3️⃣ Agrupa descrições que se dividem em várias linhas.
-      4️⃣ Limpa linhas residuais (endereços, CNPJs, etc.).
-      5️⃣ Fallback OCR posicional se nenhuma tabela for encontrada.
+    Extrai itens (produtos/serviços) de DANFE.
+    Estratégia híbrida com heurística de agrupamento:
+      1. Usa pdfplumber para extrair tabelas.
+      2. Reagrupa linhas quebradas com base em colunas numéricas ausentes.
+      3. Fallback OCR posicional se não houver tabela formal.
     """
     itens_extraidos: List[Dict[str, Any]] = []
 
     try:
+        # === 1️⃣ Tentativa: Tabela estruturada com pdfplumber ===
         tables = pdf_page.extract_tables({
             "vertical_strategy": "lines",
             "horizontal_strategy": "lines",
@@ -314,33 +312,6 @@ def extrair_itens_da_tabela(pdf_page) -> List[Dict[str, Any]]:
             "edge_min_length": 20
         })
 
-        def detectar_campos_linha(row):
-            """Identifica CFOP, NCM e valor total mesmo que a tabela esteja desalinhada."""
-            cfop, ncm, valor_total = None, None, None
-            for cell in row:
-                texto = str(cell).strip().replace(" ", "")
-                if not texto:
-                    continue
-
-                # NCM → 8 dígitos consecutivos
-                if re.fullmatch(r"\d{8}", texto):
-                    ncm = texto
-
-                # CFOP → 4 dígitos, com ou sem ponto
-                elif re.fullmatch(r"\d{1,2}\.?\d{2}", texto):
-                    cfop = texto.replace(".", "")
-
-                # Valor total → formato monetário
-                elif re.search(r"\d+,\d{2}", texto):
-                    try:
-                        valor = float(texto.replace(".", "").replace(",", "."))
-                        if valor > 0:
-                            valor_total = valor
-                    except:
-                        pass
-
-            return cfop, ncm, valor_total
-
         for table in tables:
             if not table or len(table) < 2:
                 continue
@@ -349,77 +320,68 @@ def extrair_itens_da_tabela(pdf_page) -> List[Dict[str, Any]]:
             if not any("DESCRI" in h or "PRODUTO" in h for h in header):
                 continue
 
+            # =======================
+            # HEURÍSTICA DE AGRUPAMENTO
+            # =======================
             linhas_itens = []
-            buffer = None
+            buffer = None  # linha sendo construída
 
             for row in table[1:]:
                 if not any(row):
                     continue
                 row = (row + [""] * 12)[:12]
-                descricao = str(row[1]).strip()
 
-                cfop, ncm, valor_total = detectar_campos_linha(row)
-                unidade = str(row[5]).strip() if len(row) > 5 else ""
-                quantidade = None
-                valor_unit = None
+                def to_float(v):
+                    s = str(v).replace(".", "").replace(",", ".").strip()
+                    try:
+                        return float(s)
+                    except:
+                        return None
 
-                # Detecta quantidade e valor unitário se presentes
-                for c in row:
-                    texto = str(c).strip()
-                    if re.fullmatch(r"\d+,\d{3}", texto):
-                        try:
-                            quantidade = float(texto.replace(",", "."))
-                        except:
-                            pass
-                    elif re.fullmatch(r"\d+,\d{2}", texto):
-                        try:
-                            valor_unit = float(texto.replace(",", "."))
-                        except:
-                            pass
+                valor_total = to_float(row[8])
+                ncm = str(row[2]).strip()
+                cfop = str(row[4]).strip()
 
-                # Heurística de agrupamento: linha quebrada sem valor total
+                # 🧩 Correção de desalinhamento CFOP/NCM
+                if len(cfop) < 4 and re.match(r"\d{7,8}", ncm):
+                    cfop, ncm = ncm[-4:], ncm[:-4]
+
+                # 🧩 Heurística aprimorada para unir linhas quebradas
                 if (
                     buffer
                     and not valor_total
-                    and len(descricao) > 3
-                    and not re.search(r"\d{4}", descricao)
+                    and (not cfop or cfop == buffer.get("cfop"))
+                    and len(str(row[1]).strip()) > 0
                 ):
-                    buffer["descricao"] += " " + descricao
+                    buffer["descricao"] += " " + str(row[1]).strip()
                     continue
 
+                # Linha nova
                 if buffer:
                     linhas_itens.append(buffer)
 
                 buffer = {
                     "codigo": str(row[0]).strip(),
-                    "descricao": descricao,
+                    "descricao": str(row[1]).strip(),
                     "ncm": ncm,
                     "cfop": cfop,
-                    "unidade": unidade,
-                    "quantidade": quantidade,
-                    "valor_unit": valor_unit,
+                    "unidade": str(row[5]).strip(),
+                    "quantidade": to_float(row[6]),
+                    "valor_unit": to_float(row[7]),
                     "valor_total": valor_total,
                 }
 
+
+            # adiciona o último buffer se existir
             if buffer:
                 linhas_itens.append(buffer)
 
-            # --- LIMPEZA DE LINHAS RESIDUAIS ---
-            itens_limpos = []
+            # filtra itens válidos
             for item in linhas_itens:
-                desc = str(item.get("descricao", "")).upper()
-                if (
-                    len(desc) < 5
-                    or any(k in desc for k in ["CNPJ", "INSCRIÇÃO", "ENDEREÇO", "NOTA", "DESTINATÁRIO"])
-                ):
-                    continue  # ignora linhas não relacionadas a itens
-                if item.get("valor_total") is None:
-                    continue  # ignora linhas sem valor
-                itens_limpos.append(item)
+                if item.get("descricao") and item.get("valor_total"):
+                    itens_extraidos.append(item)
 
-            itens_extraidos.extend(itens_limpos)
-
-        # === Fallback OCR posicional (caso não encontre tabela estruturada) ===
+        # === 2️⃣ Fallback: Texto posicional (caso sem linhas de tabela) ===
         if not itens_extraidos:
             words = pdf_page.extract_words()
             linhas = {}
@@ -445,6 +407,7 @@ def extrair_itens_da_tabela(pdf_page) -> List[Dict[str, Any]]:
                         if match_cod:
                             codigo = match_cod.group(0)
                             descricao = descricao[len(codigo):].strip()
+
                         if len(descricao) > 4:
                             itens_extraidos.append({
                                 "codigo": codigo,
@@ -453,9 +416,40 @@ def extrair_itens_da_tabela(pdf_page) -> List[Dict[str, Any]]:
                             })
 
         if DEBUG:
-            print(f"[DEBUG] Página {pdf_page.page_number}: {len(itens_extraidos)} itens encontrados (agrupamento e detecção dinâmica aplicados)")
+            print(f"[DEBUG] Página {pdf_page.page_number}: {len(itens_extraidos)} itens encontrados (agrupamento aplicado)")
 
-        return itens_extraidos
+        # === 3️⃣ Pós-processamento para limpeza e extração de códigos ===
+        itens_limpos = []
+        for item in itens_extraidos:
+            desc = str(item.get("descricao", "")).upper()
+
+            # Descartar ruídos típicos
+            if any(x in desc for x in ["CNPJ", "ENDEREÇO", "INSCRIÇÃO", "NOTA FISCAL", "VALOR", "DESTINATÁRIO", "EMITENTE"]):
+                continue
+
+            # Filtrar linhas sem valor válido
+            if not item.get("valor_total") or item["valor_total"] <= 0:
+                continue
+
+            # Extração heurística de NCM e CST/CSOSN dentro da descrição
+            if not item.get("ncm"):
+                match_ncm = re.search(r"\b(\d{8})\b", desc)
+                if match_ncm:
+                    item["ncm"] = match_ncm.group(1)
+
+            if not item.get("csosn") and not item.get("ocst"):
+                match_cst = re.search(r"\b(0\d{2}|10|20|30|40|41|50|60|70|90)\b", desc)
+                if match_cst:
+                    item["ocst"] = match_cst.group(1)
+
+            itens_limpos.append(item)
+
+        if DEBUG:
+            print(f"[DEBUG] {len(itens_limpos)} itens válidos após limpeza")
+
+        return itens_limpos
+
+        #return itens_extraidos
 
     except Exception as e:
         if DEBUG:
