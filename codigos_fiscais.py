@@ -17,6 +17,7 @@ Data: 2025
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import asdict, dataclass
 from enum import Enum
+import re
 
 
 DEBUG = True
@@ -855,6 +856,15 @@ def analisar_nf(
         "aliquota_cofins": 0.0,
         "avisos": [],
     }
+
+    # Normaliza CFOP removendo pontos, espaços e zeros à esquerda
+    cfop = str(cfop or "").replace(".", "").strip()
+    if cfop.isdigit() and len(cfop) == 4:
+        cfop = cfop  # ok
+    elif cfop.isdigit() and len(cfop) < 4:
+        cfop = cfop.zfill(4)
+    else:
+        cfop = re.sub(r"\D", "", cfop)[:4]
 
     try:
         # CFOP
