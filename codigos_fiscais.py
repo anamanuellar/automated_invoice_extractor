@@ -15,8 +15,9 @@ Data: 2025
 """
 
 from typing import Dict, List, Optional, Tuple, Any
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from enum import Enum
+
 
 DEBUG = True
 

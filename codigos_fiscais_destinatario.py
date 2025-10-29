@@ -16,6 +16,7 @@ Autor: Sistema de Extrator de Notas Fiscais
 
 from typing import Dict, List, Optional, Any
 from codigos_fiscais import CFOP, NCM, CSOSN, OCST, RegimeTributario
+from dataclasses import asdict
 
 
 # =============== ANÁLISE COMO DESTINATÁRIO ===============

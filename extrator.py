@@ -921,39 +921,26 @@ def exportar_para_excel_com_itens(df: pd.DataFrame) -> bytes:
         df_principal = df.drop(columns=["analise_destinatario", "resumo_analise", "itens_nf"], errors='ignore')
         df_principal.to_excel(writer, sheet_name='Notas Fiscais', index=False)
 
-        # 2. Aba de Itens
+        # Aba de itens
         todas_linhas = []
         for _, row in df.iterrows():
-            itens = row.get("itens_nf", [])
-            regime_emit = row.get("regime_emit")
-            regime_dest = row.get("regime_dest")
-            regime_final = row.get("regime_final")
-            for item in itens:
-                # AJUSTE: Filtro Mínimo para evitar linhas "lixo" na extração de itens (endereços, labels)
-                descricao = str(item.get("descricao", "")).strip()
-                # Remove linhas muito curtas ou que parecem ser rótulos
-                if len(descricao) < 5 or any(palavra in descricao.lower() for palavra in ["cnpj", "cpf", "endereço", "cep", "valor", "total"]):
-                    continue
-                    
-                todas_linhas.append({
-                    "arquivo": row["arquivo"],
-                    "numero_nf": row.get("numero_nf"),
-                    "emitente_nome": row.get("emitente_nome"),
-                    "dest_nome": row.get("dest_nome"),
-                    "data_emissao": row.get("data_emissao"),
-                    "valor_nf": row.get("valor_total_num"),
-                    "regime_emit": regime_emit,
-                    "regime_dest": regime_dest,
-                    "regime_final": regime_final,
-                    **item
-                })
+            if isinstance(row.get("itens_nf"), list):
+                for item in row["itens_nf"]:
+                    todas_linhas.append({
+                        "arquivo": row["arquivo"],
+                        "numero_nf": row.get("numero_nf"),
+                        "emitente_nome": row.get("emitente_nome"),
+                        "data_emissao": row.get("data_emissao"),
+                        "valor_nf": row.get("valor_total_num"),
+                        "regime_emit": row.get("regime_emit"),
+                        "regime_dest": row.get("regime_dest"),
+                        "regime_final": row.get("regime_final"),
+                        **item
+                    })
         if todas_linhas:
-            df_itens = pd.DataFrame(todas_linhas)
-            # AJUSTE: Renomear colunas inconsistentes
-            df_itens = df_itens.rename(columns={'cfop_desc': 'CFOP Desc.', 'ncm_desc': 'NCM Desc.'})
-            df_itens.to_excel(writer, sheet_name="Itens Detalhados", index=False)
-            
-        # 3. Aba de Análises Fiscais
+            pd.DataFrame(todas_linhas).to_excel(writer, sheet_name="Itens Detalhados", index=False)
+
+        # Aba de análises fiscais
         analises = []
         for _, row in df.iterrows():
             analise = row.get("analise_destinatario")
@@ -969,7 +956,7 @@ def exportar_para_excel_com_itens(df: pd.DataFrame) -> bytes:
                     "credito_icms": analise["credito_icms"]["valor"] if analise.get("credito_icms") else None,
                     "credito_pis": analise["credito_pis"]["valor"] if analise.get("credito_pis") else None,
                     "credito_cofins": analise["credito_cofins"]["valor"] if analise.get("credito_cofins") else None,
-                    # REMOVIDO: A coluna resumo_analise foi removida para limpar a planilha de análise.
+                    #   "resumo_analise": row.get("resumo_analise"),
                 })
         if analises:
             pd.DataFrame(analises).to_excel(writer, sheet_name="Análise Fiscal", index=False)
