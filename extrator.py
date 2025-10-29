@@ -291,56 +291,99 @@ def detectar_regime_tributario(dest_doc: Optional[str], emitente_doc: Optional[s
 
 def extrair_itens_da_tabela(pdf_page) -> List[Dict[str, Any]]:
     """
-    Versão simplificada da extração de itens.
-    Busca diretamente padrões típicos de CFOP, NCM e valores.
-    Não depende de estrutura de tabela fixa.
-    """
-    itens = []
-    try:
-        texto = pdf_page.extract_text() or ""
-        linhas = [ln.strip() for ln in texto.split("\n") if ln.strip()]
+    Extrai itens (produtos/serviços) de DANFE de forma robusta e compatível com layouts
+    desalinhados, como os da ALFATERM.
 
-        for ln in linhas:
-            # Ignora linhas óbvias que não são itens
-            if any(k in ln.upper() for k in ["CNPJ", "INSCRIÇÃO", "ENDEREÇO", "NOTA", "DESTINATÁRIO", "VALOR TOTAL", "CUPOM", "TOTAL DA"]):
+    Detecta dinamicamente NCM, CST/CSOSN, CFOP, quantidade e valores,
+    corrigindo deslocamentos que ocorrem quando o pdfplumber não delimita bem as colunas.
+    """
+    itens_extraidos: List[Dict[str, Any]] = []
+
+    try:
+        tables = pdf_page.extract_tables({
+            "vertical_strategy": "lines",
+            "horizontal_strategy": "lines",
+            "intersection_tolerance": 5,
+            "snap_tolerance": 3,
+            "join_tolerance": 3,
+            "text_x_tolerance": 2,
+            "text_y_tolerance": 2,
+            "edge_min_length": 20
+        })
+
+        for table in tables:
+            if not table or len(table) < 2:
                 continue
 
-            # Detecta NCM (8 dígitos)
-            ncm_match = re.search(r"\b(\d{8})\b", ln)
-            ncm = ncm_match.group(1) if ncm_match else None
+            header = [str(c).upper().strip() for c in table[0] if c]
+            if not any("DESCRI" in h or "PRODUTO" in h for h in header):
+                continue
 
-            # Detecta CFOP (4 dígitos, com ou sem ponto)
-            cfop_match = re.search(r"\b(\d{1,2}\.?\d{2})\b", ln)
-            cfop = cfop_match.group(1).replace(".", "") if cfop_match else None
+            for row in table[1:]:
+                campos = [str(c).strip() for c in row if str(c).strip()]
+                if not campos or len(campos) < 4:
+                    continue
 
-            # Detecta valor (último número com vírgula)
-            val_match = re.findall(r"\d{1,3}(?:\.\d{3})*,\d{2}", ln)
-            valor_total = moeda_to_float(val_match[-1]) if val_match else None
+                # --- Ignora linhas de cabeçalho ou resumo ---
+                linha = " ".join(campos).upper()
+                if any(k in linha for k in ["CNPJ", "ENDEREÇO", "NOTA", "VALOR TOTAL", "DESTINATÁRIO", "TOTAL GERAL"]):
+                    continue
 
-            # Se linha contém ao menos uma pista de item
-            if (ncm or cfop or valor_total) and len(ln) > 10:
-                descricao = ln
-                if ncm:
-                    descricao = descricao.replace(ncm, "").strip()
-                if cfop_match:
-                    descricao = descricao.replace(cfop_match.group(0), "").strip()
-                if val_match:
-                    descricao = descricao.replace(val_match[-1], "").strip()
+                # --- Detecta campos principais ---
+                ncm = next((c for c in campos if re.fullmatch(r"\d{8}", c)), None)
+                cst = next((c for c in campos if re.fullmatch(r"\d{3}", c)), None)
+                cfop = next((c.replace(".", "") for c in campos if re.fullmatch(r"\d{1,2}\.?\d{2}", c)), None)
 
-                itens.append({
-                    "descricao": descricao,
-                    "ncm": ncm,
-                    "cfop": cfop,
-                    "valor_total": valor_total
-                })
+                # Quantidade (valor com vírgula, sem ponto milhar)
+                quantidade = None
+                for c in campos:
+                    if re.fullmatch(r"\d+,\d{2}", c):
+                        try:
+                            quantidade = float(c.replace(",", "."))
+                            if 0 < quantidade < 10000:
+                                break
+                        except:
+                            continue
+
+                # Valor total → último número com vírgula e separador de milhar
+                val_match = re.findall(r"\d{1,3}(?:\.\d{3})*,\d{2}", " ".join(campos))
+                valor_total = moeda_to_float(val_match[-1]) if val_match else None
+
+                # Valor unitário → penúltimo valor se existir mais de um
+                valor_unit = moeda_to_float(val_match[-2]) if len(val_match) > 1 else None
+
+                # Base ICMS, Valor ICMS, Valor IPI (detecta blocos 0,00 0,00 0,00)
+                base_icms, valor_icms, valor_ipi = 0.0, 0.0, 0.0
+                if len(val_match) >= 3:
+                    base_icms = moeda_to_float(val_match[-3]) or 0.0
+                    valor_icms = moeda_to_float(val_match[-2]) or 0.0
+                    valor_ipi = moeda_to_float(val_match[-1]) or 0.0
+
+                # Descrição limpa
+                descricao = " ".join([c for c in campos if not re.fullmatch(r"\d{8}|\d{3}|\d{1,2}\.?\d{2}|0,00|\d{1,3}(?:\.\d{3})*,\d{2}", c)]).strip()
+
+                if descricao and valor_total:
+                    itens_extraidos.append({
+                        "descricao": descricao,
+                        "ncm": ncm,
+                        "cst": cst,
+                        "cfop": cfop,
+                        "quantidade": quantidade,
+                        "valor_unit": valor_unit,
+                        "valor_total": valor_total,
+                        "base_icms": base_icms,
+                        "valor_icms": valor_icms,
+                        "valor_ipi": valor_ipi
+                    })
 
         if DEBUG:
-            print(f"[DEBUG] Página {pdf_page.page_number}: {len(itens)} itens capturados (modo simples)")
-        return itens
+            print(f"[DEBUG] Página {pdf_page.page_number}: {len(itens_extraidos)} itens extraídos (modo ALFATERM)")
+
+        return itens_extraidos
 
     except Exception as e:
         if DEBUG:
-            print(f"[DEBUG] Erro na extração simples de itens: {e}")
+            print(f"[DEBUG] Erro na extração de itens (modo ALFATERM): {e}")
         return []
 
 
