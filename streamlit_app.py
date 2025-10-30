@@ -20,15 +20,7 @@ from openpyxl.styles import Font, PatternFill, Alignment
 from agente_financeiro import get_model_provider, analisar_contexto_ia
 from extrator import processar_pdfs
 
-# Adicionar input para chave Gemini na sidebar
-with st.sidebar:
-    api_key_gemini = st.text_input(
-        "🔑 Chave Gemini (opcional)",
-        type="password",
-        help="Para extração precisa de itens e impostos"
-    )
-
-# =============== FUNÇÃO AUXILIAR ===============
+# =============== CONFIG STREAMLIT ===============
 def exportar_para_excel(df) -> bytes:
     """Exporta DataFrame para bytes de arquivo Excel"""
     output = io.BytesIO()
@@ -246,7 +238,7 @@ if uploaded_files:
             df = processar_pdfs(
             pdf_paths,
             _progress_callback=update_progress,
-            api_key_gemini=api_key_gemini  # ⭐ NOVO
+            api_key_gemini=st.session_state.get('ia_api_key')  # ⭐ Usa chave do Gemini se disponível
 )
             
             progress_bar.progress(100)

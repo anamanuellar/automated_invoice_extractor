@@ -270,6 +270,9 @@ def extrair_dados_nf(
         valor_str: str = valor_match.group(1)
         dados["valor_total"] = limpar_string(valor_str)
         dados["valor_total_num"] = normalizar_valor_moeda(valor_str)
+    else:
+        dados["valor_total"] = None
+        dados["valor_total_num"] = np.nan
     
     # CNPJs
     cnpj_matches: List[str] = re.findall(
@@ -388,8 +391,13 @@ def extrair_dados_nf(
         dados["ncm"] = ncm_match.group(1)
     
     # 7. STATUS DE SUCESSO
-    valor_num: Union[float, Any] = dados.get("valor_total_num")
-    if dados.get("numero_nf") and valor_num is not np.nan:
+    valor_num: Union[float, Any] = dados.get("valor_total_num", np.nan)
+    try:
+        valor_valido: bool = not (isinstance(valor_num, float) and np.isnan(valor_num))
+    except (TypeError, ValueError):
+        valor_valido = False
+    
+    if dados.get("numero_nf") and valor_valido:
         dados["status"] = "SUCESSO"
         
     # 8. SALVA NO CACHE
@@ -492,6 +500,13 @@ def exportar_para_excel_com_itens(df_nfs: pd.DataFrame) -> bytes:
             regime_emitente: str = str(row.get("regime_emit", "simples"))
             
             try:
+                valor_nf: Any = row.get("valor_total_num", 0.0)
+                valor_float: float = 0.0
+                try:
+                    valor_float = float(valor_nf) if not (isinstance(valor_nf, float) and np.isnan(valor_nf)) else 0.0
+                except (TypeError, ValueError):
+                    valor_float = 0.0
+                
                 analise: Dict[str, Any] = analisar_nf_como_destinatario(
                     cfop=str(row.get("cfop", "")),
                     ncm=str(row.get("ncm", "")),
@@ -499,7 +514,7 @@ def exportar_para_excel_com_itens(df_nfs: pd.DataFrame) -> bytes:
                     regime_destinatario=regime_destinatario,
                     regime_emitente=regime_emitente,
                     uf_origem="BA",
-                    valor_total=float(row.get("valor_total_num", 0.0))
+                    valor_total=valor_float
                 )
             except Exception:
                 analise = {
