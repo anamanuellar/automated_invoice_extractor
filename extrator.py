@@ -158,6 +158,18 @@ def extrair_doc_em_linha(s: str) -> Optional[str]:
     return None
 
 
+# Alias para compatibilidade com o backup
+def achar_doc_em_linha(s: str) -> Optional[str]:
+    """Alias para extrair_doc_em_linha (compatibilidade com backup)"""
+    return extrair_doc_em_linha(s)
+
+
+def somente_digitos(s: Any) -> str:
+    """Remove tudo que não é dígito"""
+    s_str = str(s) if s is not None else ""
+    return re.sub(r"\D", "", s_str or "")
+
+
 def pick_last_money_on_same_or_next_lines(linhas: List[str], idx: int, max_ahead: int = 6) -> Optional[str]:
     """Pega último valor monetário em linhas seguintes"""
     def pick(line):
@@ -296,11 +308,11 @@ def extrair_texto_completo(pdf_path: str) -> str:
 # ==================== EXTRAÇÃO DE DADOS CAPA (REGEX - CONFIÁVEL) ====================
 
 def extrair_numero_nf(texto: str) -> Optional[str]:
-    """Extrai número da NF - lógica do backup mantida"""
+    """Extrai número da NF - LÓGICA DO BACKUP"""
     linhas = texto.split("\n")
     
     for ln in linhas:
-        # Procura "N°." ou "Nº" com números após
+        # Estratégia 1: N°. 000.504.542
         m = re.search(r"N[°ºO]\.\s*[:\-]?\s*(\d{3}\.\d{3}\.\d{3,6})", ln)
         if m:
             cand = m.group(1).replace(".", "")
@@ -311,7 +323,7 @@ def extrair_numero_nf(texto: str) -> Optional[str]:
             except:
                 pass
         
-        # Fallback: procura "Nº:" com menos restrições
+        # Estratégia 2: Nº 12345
         m = re.search(r"N[°ºO]\s*[:\-]?\s*(\d{1,6})(?:\D|$)", ln)
         if m:
             cand = m.group(1)
@@ -405,78 +417,57 @@ def extrair_nome_emitente(texto: str, cnpj_emit: Optional[str]) -> Optional[str]
 
 
 def extrair_cnpj_destinatario(texto: str) -> Optional[str]:
-    """Extrai CNPJ do destinatário - lógica EXATA do backup"""
+    """Extrai CNPJ do destinatário - LÓGICA DO BACKUP"""
     linhas = texto.split("\n")
     
     for i, ln in enumerate(linhas):
         up = ln.upper()
-        # Procura pela label "DESTINATÁRIO / REMETENTE"
         if "DESTINATÁRIO" in up or "REMETENTE" in up:
-            # Na linha seguinte geralmente tem "RAZÃO SOCIAL CNPJ / CPF"
             for j in range(i + 1, min(i + 6, len(linhas))):
                 linha_dest = linhas[j]
-                doc = extrair_doc_em_linha(linha_dest)
-                if doc and len(normalizar_cnpj_cpf(doc) or "") == 14:
-                    return doc
-    
-    # Fallback: procura por "CNPJ / CPF" seguido de CNPJ
-    for i, ln in enumerate(linhas):
-        if "CNPJ / CPF" in ln.upper():
-            for j in range(i + 1, min(i + 3, len(linhas))):
-                linha_dest = linhas[j]
-                doc = extrair_doc_em_linha(linha_dest)
-                if doc and len(normalizar_cnpj_cpf(doc) or "") == 14:
-                    return doc
+                doc_dest = achar_doc_em_linha(linha_dest)
+                if doc_dest and len(somente_digitos(doc_dest)) == 14:
+                    return doc_dest
     
     return None
 
 
 def extrair_nome_destinatario(texto: str) -> Optional[str]:
-    """Extrai nome do destinatário - lógica EXATA do backup (NOME CNPJ na mesma linha)"""
+    """Extrai nome do destinatário - LÓGICA DO BACKUP"""
     linhas = texto.split("\n")
     
     for i, ln in enumerate(linhas):
         up = ln.upper()
-        if "DESTINATÁRIO" in up or "REMETENTE" in up or "RAZÃO SOCIAL" in up:
+        if "DESTINATÁRIO" in up or "REMETENTE" in up:
             for j in range(i + 1, min(i + 6, len(linhas))):
-                linha_dest = linhas[j].strip()
-                doc_dest = extrair_doc_em_linha(linha_dest)
-                if doc_dest and len(normalizar_cnpj_cpf(doc_dest) or "") == 14:
-                    # Extrai o texto ANTES do CNPJ na mesma linha
-                    # Padrão: "HOTEIS DESIGN S.A. 04.895.339/0001-54"
+                linha_dest = linhas[j]
+                doc_dest = achar_doc_em_linha(linha_dest)
+                if doc_dest and len(somente_digitos(doc_dest)) == 14:
                     partes = linha_dest.split(doc_dest)
                     if partes[0].strip():
-                        nome = partes[0].strip()
-                        if len(nome) > 3:
-                            return nome
+                        return partes[0].strip()
     
     return None
 
 
 def extrair_valor_total(texto: str) -> Optional[str]:
-    """Extrai valor total da NF - pega ÚLTIMO valor da linha após 'VALOR TOTAL DA NOTA'"""
+    """Extrai valor total da NF - LÓGICA DO BACKUP"""
     linhas = texto.split("\n")
     
     for i, ln in enumerate(linhas):
         up = ln.upper()
         
-        # Procura por "VALOR TOTAL DA NOTA" (linha com o label)
+        # Procura por "VALOR TOTAL DA NOTA"
         if "VALOR TOTAL DA NOTA" in up:
-            # O valor está na próxima linha
-            if i + 1 < len(linhas):
-                proxima_linha = linhas[i + 1]
-                # Encontra todos os valores monetários
-                valores = RE_MOEDA.findall(proxima_linha)
-                # Remove zeros e pega o ÚLTIMO (mais à direita, que é o valor total)
-                valores = [v for v in valores if v != "0,00"]
-                if valores:
-                    return valores[-1]
-            
-            # Fallback: tenta pegarda mesma linha
-            valores = RE_MOEDA.findall(ln)
-            valores = [v for v in valores if v != "0,00"]
-            if valores:
-                return valores[-1]
+            v = pick_last_money_on_same_or_next_lines(linhas, i, 3)
+            if v:
+                return v
+        
+        # Procura por "V. TOTAL" combinado com "PRODUTOS"
+        if "V. TOTAL" in up and "PRODUTOS" in up:
+            v = pick_last_money_on_same_or_next_lines(linhas, i, 2)
+            if v:
+                return v
     
     return None
 
