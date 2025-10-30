@@ -416,16 +416,22 @@ def extrair_nome_emitente(texto: str, cnpj_emit: Optional[str]) -> Optional[str]
 
 
 def extrair_nome_destinatario(texto: str) -> Optional[str]:
-    """Extrai nome do destinatário"""
+    """Extrai nome do destinatário (antes do CNPJ, na mesma linha)"""
     linhas = texto.split("\n")
     
     for i, ln in enumerate(linhas):
         up = ln.upper()
         if "DESTINATÁRIO" in up or "REMETENTE" in up or "CLIENTE" in up:
-            for j in range(i + 1, min(i + 8, len(linhas))):
-                linha_dest = linhas[j].strip()
-                if len(linha_dest) > 5 and not any(k in linha_dest.upper() for k in ["CNPJ", "ENDEREÇO", "INSCRI"]):
-                    return linha_dest
+            for j in range(i + 1, min(i + 6, len(linhas))):
+                linha_dest = linhas[j]
+                doc_dest = extrair_doc_em_linha(linha_dest)
+                if doc_dest and len(normalizar_cnpj_cpf(doc_dest) or "") == 14:
+                    # Extrai o texto ANTES do CNPJ na mesma linha
+                    partes = linha_dest.split(doc_dest)
+                    if partes[0].strip():
+                        nome = partes[0].strip()
+                        if len(nome) > 3:
+                            return nome
     
     return None
 
@@ -447,23 +453,26 @@ def extrair_cnpj_destinatario(texto: str) -> Optional[str]:
 
 
 def extrair_valor_total(texto: str) -> Optional[str]:
-    """Extrai valor total da NF - prioriza VALOR TOTAL DA NOTA"""
+    """Extrai valor total da NF - busca VALOR TOTAL DA NOTA e pega ÚLTIMO valor na linha seguinte"""
     linhas = texto.split("\n")
     
     for i, ln in enumerate(linhas):
         up = ln.upper()
         
-        # Padrão principal: "VALOR TOTAL DA NOTA"
+        # Padrão: encontra "VALOR TOTAL DA NOTA" e pega ÚLTIMO valor da próxima linha
         if "VALOR TOTAL DA NOTA" in up:
-            v = pick_last_money_on_same_or_next_lines(linhas, i, 1)
-            if v:
-                return v
-        
-        # Padrão alternativo: "VALOR TOTAL" sozinho (não tributos)
-        if re.search(r"^\s*VALOR\s+TOTAL\s*$", up):
-            v = pick_last_money_on_same_or_next_lines(linhas, i, 1)
-            if v:
-                return v
+            if i + 1 < len(linhas):
+                proxima_linha = linhas[i + 1]
+                valores = RE_MOEDA.findall(proxima_linha)
+                # Remove zeros e pega o ÚLTIMO valor (mais à direita)
+                valores = [v for v in valores if v != "0,00"]
+                if valores:
+                    return valores[-1]
+            # Se não encontrar valor na próxima, tenta mesma linha
+            valores = RE_MOEDA.findall(ln)
+            valores = [v for v in valores if v != "0,00"]
+            if valores:
+                return valores[-1]
     
     return None
 
