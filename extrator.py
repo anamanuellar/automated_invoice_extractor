@@ -296,12 +296,12 @@ def extrair_texto_completo(pdf_path: str) -> str:
 # ==================== EXTRAÇÃO DE DADOS CAPA (REGEX - CONFIÁVEL) ====================
 
 def extrair_numero_nf(texto: str) -> Optional[str]:
-    """Extrai número da NF com múltiplas estratégias"""
+    """Extrai número da NF - lógica do backup mantida"""
     linhas = texto.split("\n")
     
     for ln in linhas:
-        # Estratégia 1: NF formatada com pontos
-        m = RE_NF_MAIN.search(ln)
+        # Procura "N°." ou "Nº" com números após
+        m = re.search(r"N[°ºO]\.\s*[:\-]?\s*(\d{3}\.\d{3}\.\d{3,6})", ln)
         if m:
             cand = m.group(1).replace(".", "")
             try:
@@ -311,19 +311,8 @@ def extrair_numero_nf(texto: str) -> Optional[str]:
             except:
                 pass
         
-        # Estratégia 2: NF simples
-        m = RE_NF_ALT.search(ln)
-        if m:
-            cand = m.group(1).replace(".", "")
-            try:
-                val = int(cand)
-                if 1 <= val <= 999999:
-                    return str(val)
-            except:
-                pass
-        
-        # Estratégia 3: NF curta
-        m = RE_NF_NUMERO.search(ln)
+        # Fallback: procura "Nº:" com menos restrições
+        m = re.search(r"N[°ºO]\s*[:\-]?\s*(\d{1,6})(?:\D|$)", ln)
         if m:
             cand = m.group(1)
             try:
@@ -415,13 +404,29 @@ def extrair_nome_emitente(texto: str, cnpj_emit: Optional[str]) -> Optional[str]
     return None
 
 
-def extrair_nome_destinatario(texto: str) -> Optional[str]:
-    """Extrai nome do destinatário (antes do CNPJ, na mesma linha)"""
+def extrair_cnpj_destinatario(texto: str) -> Optional[str]:
+    """Extrai CNPJ do destinatário - lógica EXATA do backup"""
     linhas = texto.split("\n")
     
     for i, ln in enumerate(linhas):
         up = ln.upper()
-        if "DESTINATÁRIO" in up or "REMETENTE" in up or "CLIENTE" in up:
+        if "DESTINATÁRIO" in up or "REMETENTE" in up:
+            for j in range(i + 1, min(i + 6, len(linhas))):
+                linha_dest = linhas[j]
+                doc = extrair_doc_em_linha(linha_dest)
+                if doc and len(normalizar_cnpj_cpf(doc) or "") == 14:
+                    return doc
+    
+    return None
+
+
+def extrair_nome_destinatario(texto: str) -> Optional[str]:
+    """Extrai nome do destinatário - lógica EXATA do backup (antes do CNPJ)"""
+    linhas = texto.split("\n")
+    
+    for i, ln in enumerate(linhas):
+        up = ln.upper()
+        if "DESTINATÁRIO" in up or "REMETENTE" in up:
             for j in range(i + 1, min(i + 6, len(linhas))):
                 linha_dest = linhas[j]
                 doc_dest = extrair_doc_em_linha(linha_dest)
@@ -436,43 +441,24 @@ def extrair_nome_destinatario(texto: str) -> Optional[str]:
     return None
 
 
-def extrair_cnpj_destinatario(texto: str) -> Optional[str]:
-    """Extrai CNPJ do destinatário (segundo CNPJ ou após palavra-chave)"""
-    linhas = texto.split("\n")
-    
-    for i, ln in enumerate(linhas):
-        up = ln.upper()
-        if "DESTINATÁRIO" in up or "REMETENTE" in up or "CLIENTE" in up:
-            for j in range(i + 1, min(i + 6, len(linhas))):
-                linha_dest = linhas[j]
-                doc = extrair_doc_em_linha(linha_dest)
-                if doc and len(normalizar_cnpj_cpf(doc) or "") == 14:
-                    return doc
-    
-    return None
-
-
 def extrair_valor_total(texto: str) -> Optional[str]:
-    """Extrai valor total da NF - busca VALOR TOTAL DA NOTA e pega ÚLTIMO valor na linha seguinte"""
+    """Extrai valor total da NF - lógica EXATA do backup"""
     linhas = texto.split("\n")
     
     for i, ln in enumerate(linhas):
         up = ln.upper()
         
-        # Padrão: encontra "VALOR TOTAL DA NOTA" e pega ÚLTIMO valor da próxima linha
+        # Procura por "VALOR TOTAL DA NOTA"
         if "VALOR TOTAL DA NOTA" in up:
-            if i + 1 < len(linhas):
-                proxima_linha = linhas[i + 1]
-                valores = RE_MOEDA.findall(proxima_linha)
-                # Remove zeros e pega o ÚLTIMO valor (mais à direita)
-                valores = [v for v in valores if v != "0,00"]
-                if valores:
-                    return valores[-1]
-            # Se não encontrar valor na próxima, tenta mesma linha
-            valores = RE_MOEDA.findall(ln)
-            valores = [v for v in valores if v != "0,00"]
-            if valores:
-                return valores[-1]
+            v = pick_last_money_on_same_or_next_lines(linhas, i, 3)
+            if v:
+                return v
+        
+        # Procura por "V. TOTAL" combinado com "PRODUTOS"
+        if "V. TOTAL" in up and "PRODUTOS" in up:
+            v = pick_last_money_on_same_or_next_lines(linhas, i, 2)
+            if v:
+                return v
     
     return None
 
