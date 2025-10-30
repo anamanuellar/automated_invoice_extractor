@@ -1,15 +1,24 @@
-from typing import Any, Optional, Union, List, Dict, cast
+"""
+EXTRATOR HÍBRIDO: REGEX + IA GENERATIVA
+========================================
+
+Usa:
+- REGEX: Para dados simples (NF, série, data, CNPJ)
+- IA GENERATIVA: Para dados complexos (itens, impostos, códigos)
+
+Isto resolve o problema de captura incorreta de impostos e códigos.
+"""
+
+from typing import Any, Optional, Union, List, Dict, Type
 import os
 import io
 import re
-import requests
 import time
 from pathlib import Path
 from datetime import datetime
 import numpy as np
 import pdfplumber
 import pandas as pd
-from PIL import Image
 import fitz
 from codigos_fiscais import analisar_nf
 from codigos_fiscais_destinatario import analisar_nf_como_destinatario, gerar_resumo_analise
@@ -18,7 +27,20 @@ import traceback
 import hashlib
 import streamlit as st
 
-# ==================== CACHE HÍBRIDO (DISCO + MEMÓRIA + STREAMLIT) ====================
+# Type stub para ExtractorIA
+ExtractorIA: Optional[Type] = None
+GEMINI_DISPONIVEL: bool = False
+IA_DISPONIVEL: bool = False
+
+try:
+    from extrator_ia_itens_impostos import ExtractorIA, GEMINI_DISPONIVEL
+    IA_DISPONIVEL = True
+except ImportError:
+    IA_DISPONIVEL = False
+    GEMINI_DISPONIVEL = False
+    print("⚠️ Módulo de IA não disponível. Usando apenas REGEX.")
+
+# ==================== CACHE ====================
 
 CACHE_DIR: str = "cache_nf"
 os.makedirs(CACHE_DIR, exist_ok=True)
@@ -73,11 +95,9 @@ def limpar_string(texto: Optional[Any]) -> str:
     # Converte para string com tratamento de tipos complexos
     temp_content: str
     if isinstance(texto, (list, dict)):
-        # Para list ou dict, converte cada item para string
         items: Union[list, List[str]] = texto if isinstance(texto, list) else [str(texto)]
         temp_content = " ".join(str(item) for item in items)
     else:
-        # Para outros tipos (str, int, etc), converte diretamente
         temp_content = str(texto)
     
     # Processamento de limpeza
@@ -111,8 +131,6 @@ def normalizar_cnpj_cpf(doc: Optional[str]) -> Optional[str]:
     return doc_clean if len(doc_clean) in [11, 14] else None
 
 
-# ==================== FUNÇÃO DE ENRIQUECIMENTO (CNPJ) ====================
-
 def buscar_nome_empresa_cnpj(cnpj: str) -> Optional[str]:
     """Busca o nome da empresa usando CNPJ (simulado/cacheado)."""
     if not cnpj or len(cnpj) != 14:
@@ -134,7 +152,7 @@ def buscar_nome_empresa_cnpj(cnpj: str) -> Optional[str]:
     return nome
 
 
-# ==================== OCR E PRÉ-PROCESSAMENTO (PyMuPDF) ====================
+# ==================== OCR ====================
 
 def ocr_pdf_pymupdf(pdf_path: str) -> str:
     """Realiza OCR e extração de texto usando PyMuPDF (fitz) para PDFs digitalizados."""
@@ -167,11 +185,24 @@ def ocr_pdf_pymupdf(pdf_path: str) -> str:
     return "\n".join(texto_completo)
 
 
-# ==================== EXTRAÇÃO PRINCIPAL (PDFPLUMBER/RE) ====================
+# ==================== EXTRAÇÃO PRINCIPAL HÍBRIDA ====================
 
-def extrair_dados_nf(pdf_path: str, enriquecer_cnpj: bool = True) -> Dict[str, Any]:
+def extrair_dados_nf(
+    pdf_path: str,
+    enriquecer_cnpj: bool = True,
+    api_key_gemini: Optional[str] = None
+) -> Dict[str, Any]:
     """
     Função principal para extrair dados de uma única NF-e em PDF.
+    
+    Usa:
+    - REGEX para dados simples (NF, série, data, CNPJ)
+    - IA GENERATIVA para itens e impostos (se chave fornecida)
+    
+    Args:
+        pdf_path: Caminho do PDF
+        enriquecer_cnpj: Se deve buscar nome via CNPJ
+        api_key_gemini: Chave da API Gemini (opcional)
     """
     
     hash_pdf: str = get_pdf_hash(pdf_path)
@@ -186,7 +217,7 @@ def extrair_dados_nf(pdf_path: str, enriquecer_cnpj: bool = True) -> Dict[str, A
         "status": "FALHA NA EXTRAÇÃO"
     }
     
-    # 1. Extração de texto
+    # 1. EXTRAÇÃO DE TEXTO
     texto_completo: str = ocr_pdf_pymupdf(pdf_path)
     
     if not texto_completo.strip():
@@ -201,7 +232,7 @@ def extrair_dados_nf(pdf_path: str, enriquecer_cnpj: bool = True) -> Dict[str, A
         salvar_cache_nf(hash_pdf, dados)
         return dados
     
-    # 2. Extração usando Regex
+    # 2. EXTRAÇÃO COM REGEX (dados simples)
     
     # Número e série da NF
     nf_match = re.search(
@@ -229,7 +260,7 @@ def extrair_dados_nf(pdf_path: str, enriquecer_cnpj: bool = True) -> Dict[str, A
         except ValueError:
             dados["data_emissao_obj"] = None
 
-    # Valor total
+    # Valor total (por REGEX primeiro)
     valor_match = re.search(
         r'(?:VALOR TOTAL DA NOTA|TOTAL DA NOTA|VALOR TOTAL NF|TOTAL DA NF)[^\d]*R?\$\s*(\d{1,3}(?:\.\d{3})*,\d{2})',
         dados["texto_completo"],
@@ -246,7 +277,6 @@ def extrair_dados_nf(pdf_path: str, enriquecer_cnpj: bool = True) -> Dict[str, A
         dados["texto_completo"]
     )
     
-    # CNPJ do Emitente
     cnpj_emit_match = re.search(
         r'(?:CNPJ|CPF|INSCRIÇÃO)\s*DO\s*EMITENTE:\s*(\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2})',
         dados["texto_completo"],
@@ -258,7 +288,6 @@ def extrair_dados_nf(pdf_path: str, enriquecer_cnpj: bool = True) -> Dict[str, A
     elif cnpj_matches:
         dados["emitente_doc"] = normalizar_cnpj_cpf(cnpj_matches[0])
         
-    # CNPJ do Destinatário
     cnpj_dest_match = re.search(
         r'(?:CNPJ|CPF|INSCRIÇÃO)\s*DO\s*DESTINATÁRIO:\s*(\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2})',
         dados["texto_completo"],
@@ -270,7 +299,7 @@ def extrair_dados_nf(pdf_path: str, enriquecer_cnpj: bool = True) -> Dict[str, A
     elif len(cnpj_matches) > 1:
         dados["dest_doc"] = normalizar_cnpj_cpf(cnpj_matches[1])
 
-    # 3. Enriquecimento de Nomes - CORRIGIDO PARA PYLANCE
+    # 3. Enriquecimento de Nomes
     if enriquecer_cnpj:
         emitente_doc: Optional[str] = dados.get("emitente_doc")
         if emitente_doc and isinstance(emitente_doc, str):
@@ -291,7 +320,57 @@ def extrair_dados_nf(pdf_path: str, enriquecer_cnpj: bool = True) -> Dict[str, A
     if not dados.get("dest_nome"):
         dados["dest_nome"] = "Destinatário não encontrado"
     
-    # 4. Dados fiscais
+    # 4. EXTRAÇÃO COM IA (dados complexos) ⭐
+    if api_key_gemini and IA_DISPONIVEL and GEMINI_DISPONIVEL and ExtractorIA is not None:
+        try:
+            extractor_ia: Any = ExtractorIA(api_key_gemini)  # type: ignore
+            
+            if extractor_ia.model is not None and "CONECTADO" in extractor_ia.status:
+                # Extrai itens, impostos e códigos com IA
+                resultado_ia: Dict[str, Any] = extractor_ia.extrair_nf_completa(dados["texto_completo"])
+                
+                dados["itens"] = resultado_ia.get("itens", [])
+                dados["impostos"] = resultado_ia.get("impostos", {})
+                dados["codigos_fiscais"] = resultado_ia.get("codigos_fiscais", {})
+                dados["extracao_ia"] = True
+                
+                # Extrai valores dos impostos
+                if resultado_ia.get("impostos"):
+                    impostos: Dict[str, Any] = resultado_ia["impostos"]
+                    dados["valor_icms"] = impostos.get("valor_icms", 0)
+                    dados["valor_ipi"] = impostos.get("valor_ipi", 0)
+                    dados["valor_pis"] = impostos.get("valor_pis", 0)
+                    dados["valor_cofins"] = impostos.get("valor_cofins", 0)
+                    dados["regime_tributario"] = impostos.get("regime_tributario", "normal")
+        
+        except Exception as e:
+            dados["extracao_ia"] = False
+            dados["erro_ia"] = str(e)
+            if os.environ.get("DEBUG"):
+                print(f"Erro ao usar IA: {e}")
+    else:
+        dados["extracao_ia"] = False
+    
+    # 5. FALLBACK: REGEX para impostos (se IA não funcionou)
+    if not dados.get("extracao_ia"):
+        # Tenta extrair impostos por REGEX (básico)
+        icms_match = re.search(
+            r'(?:ICMS|V\. ICMS)[:\s]*R?\$?\s*(\d{1,3}(?:\.\d{3})*,\d{2})',
+            dados["texto_completo"],
+            re.IGNORECASE
+        )
+        if icms_match:
+            dados["valor_icms"] = normalizar_valor_moeda(icms_match.group(1))
+        
+        ipi_match = re.search(
+            r'(?:IPI|V\. IPI)[:\s]*R?\$?\s*(\d{1,3}(?:\.\d{3})*,\d{2})',
+            dados["texto_completo"],
+            re.IGNORECASE
+        )
+        if ipi_match:
+            dados["valor_ipi"] = normalizar_valor_moeda(ipi_match.group(1))
+    
+    # 6. CÓDIGOS FISCAIS
     cfop_match = re.search(r'CFOP:\s*(\d{4})', dados["texto_completo"], re.IGNORECASE)
     if cfop_match:
         dados["cfop"] = cfop_match.group(1)
@@ -308,12 +387,12 @@ def extrair_dados_nf(pdf_path: str, enriquecer_cnpj: bool = True) -> Dict[str, A
     if ncm_match:
         dados["ncm"] = ncm_match.group(1)
     
-    # Status de sucesso
+    # 7. STATUS DE SUCESSO
     valor_num: Union[float, Any] = dados.get("valor_total_num")
     if dados.get("numero_nf") and valor_num is not np.nan:
         dados["status"] = "SUCESSO"
         
-    # 5. Salva no cache
+    # 8. SALVA NO CACHE
     salvar_cache_nf(hash_pdf, dados)
     return dados
 
@@ -322,10 +401,16 @@ def extrair_dados_nf(pdf_path: str, enriquecer_cnpj: bool = True) -> Dict[str, A
 
 def processar_pdfs(
     pdf_paths: List[str],
-    _progress_callback: Optional[Any] = None
+    _progress_callback: Optional[Any] = None,
+    api_key_gemini: Optional[str] = None
 ) -> pd.DataFrame:
     """
     Processa uma lista de caminhos de PDFs e retorna um DataFrame com os resultados.
+    
+    Args:
+        pdf_paths: Lista de caminhos dos PDFs
+        _progress_callback: Função de callback para progresso
+        api_key_gemini: Chave da API Gemini (opcional, para IA)
     """
     if not pdf_paths:
         return pd.DataFrame()
@@ -342,11 +427,15 @@ def processar_pdfs(
             _progress_callback(message)
 
         try:
-            dados_nf: Dict[str, Any] = extrair_dados_nf(pdf_path)
+            dados_nf: Dict[str, Any] = extrair_dados_nf(
+                pdf_path,
+                api_key_gemini=api_key_gemini
+            )
             notas_fiscais_extraidas.append(dados_nf)
             
             if _progress_callback:
-                _progress_callback(f"✅ Extração de {nome_arquivo} concluída.")
+                metodo = "IA+REGEX" if dados_nf.get("extracao_ia") else "REGEX"
+                _progress_callback(f"✅ Extração de {nome_arquivo} concluída ({metodo})")
 
         except Exception as e:
             dados_falha: Dict[str, Any] = {
@@ -381,7 +470,20 @@ def exportar_para_excel_com_itens(df_nfs: pd.DataFrame) -> bytes:
         # 1. Aba de Notas Fiscais
         df_nfs.to_excel(writer, sheet_name='Notas Fiscais', index=False)
 
-        # 2. Aba de Análise Fiscal
+        # 2. Aba de Itens (se extraídos com IA)
+        todos_itens: List[Dict[str, Any]] = []
+        for _, row in df_nfs.iterrows():
+            itens_nf = row.get("itens")
+            if isinstance(itens_nf, list):
+                for item in itens_nf:
+                    item["numero_nf"] = row.get("numero_nf")
+                    item["arquivo"] = row.get("arquivo")
+                    todos_itens.append(item)
+        
+        if todos_itens:
+            pd.DataFrame(todos_itens).to_excel(writer, sheet_name="Itens", index=False)
+
+        # 3. Aba de Análise Fiscal
         analises: List[Dict[str, Any]] = []
         
         for _, row in df_nfs.iterrows():
@@ -429,6 +531,9 @@ def exportar_para_excel_com_itens(df_nfs: pd.DataFrame) -> bytes:
                 "credito_icms": credito_icms,
                 "credito_pis": credito_pis,
                 "credito_cofins": credito_cofins,
+                "valor_icms_extraido": float(row.get("valor_icms", 0)),
+                "valor_ipi_extraido": float(row.get("valor_ipi", 0)),
+                "metodo_extracao": "IA" if row.get("extracao_ia") else "REGEX"
             })
         
         if analises:
@@ -471,4 +576,5 @@ def gerar_relatorio_pdf(df_resumo: pd.DataFrame) -> None:
 # ==================== MAIN ====================
 
 if __name__ == "__main__":
-    print("Módulo extrator carregado. Execute via Streamlit.")
+    print("Módulo extrator carregado com suporte a IA")
+    print(f"IA disponível: {IA_DISPONIVEL}")

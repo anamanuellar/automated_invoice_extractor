@@ -31,4 +31,4 @@ torch>=2.0.0
 
 # IA
 openai
-google-genai
+google-generativeai>=0.3.0
