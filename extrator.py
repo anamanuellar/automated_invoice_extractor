@@ -1,973 +1,448 @@
-from typing import Any, Optional, List, Dict
-import os, io, re, requests, time
+from typing import Any, Optional, Union, List, Dict, cast
+import os
+import io
+import re
+import requests
+import time
 from pathlib import Path
 from datetime import datetime
 import numpy as np
 import pdfplumber
 import pandas as pd
-from PIL import Image, ImageEnhance, ImageOps
-import fitz # PyMuPDF
+from PIL import Image
+import fitz
 from codigos_fiscais import analisar_nf
 from codigos_fiscais_destinatario import analisar_nf_como_destinatario, gerar_resumo_analise
 import json
 import traceback
+import hashlib
+import streamlit as st
 
 # ==================== CACHE HÍBRIDO (DISCO + MEMÓRIA + STREAMLIT) ====================
 
-import hashlib, json, streamlit as st
-
-# Diretório para armazenar resultados já processados
-CACHE_DIR = "cache_nf"
+CACHE_DIR: str = "cache_nf"
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-# Cache em memória para CNPJs e resultados de NF
-CNPJ_CACHE: dict[str, Optional[str]] = {}
-NF_MEM_CACHE: dict[str, dict] = {}
+CNPJ_CACHE: Dict[str, Optional[str]] = {}
+NF_MEM_CACHE: Dict[str, Dict[str, Any]] = {}
+
 
 def get_pdf_hash(pdf_path: str) -> str:
     """Gera um hash MD5 único do conteúdo do PDF"""
     with open(pdf_path, "rb") as f:
         return hashlib.md5(f.read()).hexdigest()
 
-def carregar_cache_nf(hash_pdf: str) -> Optional[dict]:
+
+def carregar_cache_nf(hash_pdf: str) -> Optional[Dict[str, Any]]:
     """Tenta carregar o resultado do cache em disco"""
-    # 1️⃣ Cache em memória (mais rápido)
     if hash_pdf in NF_MEM_CACHE:
         return NF_MEM_CACHE[hash_pdf]
 
-    # 2️⃣ Cache em disco (persistente)
-    path = os.path.join(CACHE_DIR, f"{hash_pdf}.json")
+    path: str = os.path.join(CACHE_DIR, f"{hash_pdf}.json")
     if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            NF_MEM_CACHE[hash_pdf] = data
-            return data
-    return None
-
-def salvar_cache_nf(hash_pdf: str, data: dict):
-    """Salva o resultado do processamento da NF no cache em disco e memória"""
-    NF_MEM_CACHE[hash_pdf] = data
-    path = os.path.join(CACHE_DIR, f"{hash_pdf}.json")
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-# =============== CONFIG (MANTIDO) ===============
-DEBUG = True
-CNPJ_CACHE: dict[str, Optional[str]] = {}
-EASY_OCR = None # Inicializar a variável global para evitar erros
-
-# =============== REGEX (MANTIDO) ===============
-RE_MOEDA = re.compile(r"R?\$?\s*(\d{1,3}(?:\.\d{3})*,\d{2})")
-RE_DATA = re.compile(r"\b\d{2}/\d{2}/\d{4}\b")
-
-RE_NF_MAIN  = re.compile(r"NOTA\s+FISCAL\s+ELETR[ÔO]NICA\s*N[ºO]?\s*([\d\.]+)", re.I)
-RE_NF_ALT  = re.compile(r"\b(?:NF-?E|N[ºO]|NUM(?:ERO)?|NRO)\s*[:\-]?\s*([\d\.]+)", re.I)
-RE_NF_NUMERO = re.compile(r"N[ºO\.]?\s*[:\-]?\s*(\d{1,6})", re.I)
-
-RE_SERIE   = re.compile(r"S[ÉE]RIE\s*[:\-]?\s*([0-9\.]{1,5})", re.I)
-RE_SERIE_ALT = re.compile(r"(?:^|\n)S[ÉE]RIE\s*[:\-]?\s*(\d+)", re.I)
-
-RE_CNPJ_MASK  = re.compile(r"\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}")
-RE_CNPJ_PLAIN = re.compile(r"\b\d{14}\b")
-RE_CPF_MASK  = re.compile(r"\b\d{3}\.\d{3}\.\d{3}-\d{2}\b")
-RE_CPF_PLAIN  = re.compile(r"\b\d{11}\b")
-
-# =============== UTILS (MANTIDO) ===============
-def carregar_easy_ocr():
-  try:
-    import easyocr
-    reader = easyocr.Reader(['pt', 'en'], gpu=False)
-    return reader
-  except ImportError:
-    return None
-  
-def somente_digitos(s: Any) -> str:
-  s_str = str(s) if s is not None else ""
-  return re.sub(r"\D", "", s_str or "")
-
-def fmt_cnpj(cnpj_digits: str) -> str:
-  d = somente_digitos(cnpj_digits)
-  if len(d) != 14: return cnpj_digits
-  return f"{d[0:2]}.{d[2:5]}.{d[5:8]}/{d[8:12]}-{d[12:14]}"
-
-def fmt_cpf(cpf_digits: str) -> str:
-  d = somente_digitos(cpf_digits)
-  if len(d) != 11: return cpf_digits
-  return f"{d[0:3]}.{d[3:6]}.{d[6:9]}-{d[9:11]}"
-
-def achar_doc_em_linha(s: str) -> Optional[str]:
-  m = RE_CNPJ_MASK.search(s) or RE_CPF_MASK.search(s)
-  if m: return m.group(0)
-  m = RE_CNPJ_PLAIN.search(s)
-  if m: return fmt_cnpj(m.group(0))
-  m = RE_CPF_PLAIN.search(s)
-  if m: return fmt_cpf(m.group(0))
-  return None
-
-def moeda_to_float(s: Optional[str]) -> Optional[float]:
-  if not s: return None
-  try: return float(s.replace(".", "").replace(",", "."))
-  except: return None
-
-def pick_last_money_on_same_or_next_lines(linhas, idx, max_ahead=6):
-  def pick(line):
-    vals = RE_MOEDA.findall(line)
-    vals = [v for v in vals if v != "0,00"]
-    return vals[-1] if vals else None
-  v = pick(linhas[idx])
-  if v: return v
-  for j in range(1, max_ahead + 1):
-    k = idx + j
-    if k >= len(linhas): break
-    v = pick(linhas[k])
-    if v: return v
-  return None
-  
-
-# Consulta API para enriquecer nome emitente a partir do CNPJ (Corrigida)
-
-# ==================== CACHE PERSISTENTE DE CNPJ ====================
-
-CACHE_CNPJ_FILE = "cache_cnpj.json"
-CNPJ_CACHE: dict[str, Optional[str]] = {}
-
-def carregar_cache_cnpj():
-    """Carrega cache persistente de CNPJs se existir."""
-    global CNPJ_CACHE
-    if os.path.exists(CACHE_CNPJ_FILE):
         try:
-            with open(CACHE_CNPJ_FILE, "r", encoding="utf-8") as f:
-                CNPJ_CACHE = json.load(f)
-            if DEBUG:
-                print(f"[DEBUG] Cache CNPJ carregado: {len(CNPJ_CACHE)} registros")
-        except Exception as e:
-            if DEBUG:
-                print(f"[DEBUG] Falha ao carregar cache CNPJ: {e}")
-            CNPJ_CACHE = {}
-
-def salvar_cache_cnpj():
-    """Salva cache persistente de CNPJs."""
-    try:
-        with open(CACHE_CNPJ_FILE, "w", encoding="utf-8") as f:
-            json.dump(CNPJ_CACHE, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        if DEBUG:
-            print(f"[DEBUG] Falha ao salvar cache CNPJ: {e}")
-
-# ==================== CONSULTA COM FALLBACK E CACHE ====================
-
-def consulta_cnpj_api(cnpj: str) -> Optional[str]:
-    """
-    Consulta nome empresarial do CNPJ usando ReceitaWS e BrasilAPI como fallback.
-    Implementa cache persistente e limite de tentativas para evitar loop infinito.
-    """
-    cnpj_digits = somente_digitos(cnpj)
-    if len(cnpj_digits) != 14:
-        return None
-
-    # ✅ Verifica cache primeiro
-    if cnpj_digits in CNPJ_CACHE:
-        if DEBUG:
-            print(f"[DEBUG] Cache hit para {cnpj_digits}")
-        return CNPJ_CACHE[cnpj_digits]
-
-    tentativas = 0
-    nome_empresarial = None
-
-    # === 1️⃣ Primeira tentativa: ReceitaWS ===
-    while tentativas < 3:
-        tentativas += 1
-        url = f"https://www.receitaws.com.br/v1/cnpj/{cnpj_digits}"
-        try:
-            response = requests.get(url, timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                if isinstance(data, dict) and data.get("status") == "OK":
-                    nome_empresarial = data.get("nome")
-                    break
-                elif data.get("status") == "ERROR":
-                    if DEBUG:
-                        print(f"[DEBUG] ReceitaWS erro: {data.get('message')}")
-                    break
-            elif response.status_code == 429:
-                if DEBUG:
-                    print(f"[DEBUG] Rate Limit (429) ReceitaWS → tentativa {tentativas}/3")
-                time.sleep(10)
-                continue
-            else:
-                if DEBUG:
-                    print(f"[DEBUG] HTTP {response.status_code} ReceitaWS → tentativa {tentativas}/3")
-                break
-        except Exception as e:
-            if DEBUG:
-                print(f"[DEBUG] Erro ReceitaWS tentativa {tentativas}: {e}")
-            time.sleep(2)
-
-    # === 2️⃣ Fallback: BrasilAPI (se ReceitaWS falhou) ===
-    if not nome_empresarial:
-        try:
-            url_brasil = f"https://brasilapi.com.br/api/cnpj/v1/{cnpj_digits}"
-            resp = requests.get(url_brasil, timeout=10)
-            if resp.status_code == 200:
-                data_brasil = resp.json()
-                nome_empresarial = data_brasil.get("razao_social") or data_brasil.get("nome_fantasia")
-                if DEBUG:
-                    print(f"[DEBUG] Fallback BrasilAPI OK → {nome_empresarial}")
-            else:
-                if DEBUG:
-                    print(f"[DEBUG] BrasilAPI retornou {resp.status_code}")
-        except Exception as e:
-            if DEBUG:
-                print(f"[DEBUG] Fallback BrasilAPI falhou: {e}")
-
-    # === 3️⃣ Atualiza cache (mesmo que None, para evitar repetir falhas) ===
-    CNPJ_CACHE[cnpj_digits] = nome_empresarial
-    salvar_cache_cnpj()
-
-    return nome_empresarial
-
-
-
-def detectar_regime_tributario(dest_doc: Optional[str], emitente_doc: Optional[str] = None) -> str:
-    """
-    Detecta automaticamente o regime tributário (simples ou normal) com base no CNPJ do destinatário.
-    Fallback: usa o CNPJ do emitente se o destinatário não estiver disponível.
-    Retorna:
-      - 'simples' → Optante pelo Simples Nacional
-      - 'normal'  → Lucro Real ou Presumido
-    """
-    def consultar(cnpj: str) -> Optional[str]:
-        cnpj_digits = somente_digitos(cnpj)
-        if not cnpj_digits or len(cnpj_digits) != 14:
+            with open(path, "r", encoding="utf-8") as f:
+                data: Dict[str, Any] = json.load(f)
+                NF_MEM_CACHE[hash_pdf] = data
+                return data
+        except Exception:
             return None
+    return None
 
-        # ✅ Verifica cache para evitar consultas repetidas
-        if cnpj_digits in CNPJ_CACHE and CNPJ_CACHE[cnpj_digits]:
-            return CNPJ_CACHE[cnpj_digits]
 
-        url = f"https://www.receitaws.com.br/v1/cnpj/{cnpj_digits}"
-        try:
-            response = requests.get(url, timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                if isinstance(data, dict):
-                    optante = data.get("opcao_pelo_simples") or data.get("simples")
-                    situacao = data.get("situacao_especial", "")
+def salvar_cache_nf(hash_pdf: str, data: Dict[str, Any]) -> None:
+    """Salva o resultado no cache em disco e memória"""
+    NF_MEM_CACHE[hash_pdf] = data
+    
+    path: str = os.path.join(CACHE_DIR, f"{hash_pdf}.json")
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+    except Exception as e:
+        print(f"Erro ao salvar cache: {e}")
 
-                    # 🔍 Verifica se é Simples Nacional
-                    if isinstance(optante, str) and "sim" in optante.lower():
-                        CNPJ_CACHE[cnpj_digits] = "simples"
-                        return "simples"
-                    if "SIMPLES" in str(situacao).upper():
-                        CNPJ_CACHE[cnpj_digits] = "simples"
-                        return "simples"
 
-                    # Caso não se enquadre → grava e retorna normal
-                    CNPJ_CACHE[cnpj_digits] = "normal"
-                    return "normal"
+# ==================== FUNÇÕES AUXILIARES ====================
 
-            elif response.status_code == 429 and DEBUG:
-                print("[DEBUG] Rate limit na ReceitaWS - fallback 'normal'")
-                CNPJ_CACHE[cnpj_digits] = "normal"
+def limpar_string(texto: Optional[Any]) -> str:
+    """Remove caracteres indesejados, normaliza a string e lida com tipos não-string."""
+    
+    if texto is None:
+        return ""
+    
+    # Converte para string com tratamento de tipos complexos
+    temp_content: str
+    if isinstance(texto, (list, dict)):
+        # Para list ou dict, converte cada item para string
+        items: Union[list, List[str]] = texto if isinstance(texto, list) else [str(texto)]
+        temp_content = " ".join(str(item) for item in items)
+    else:
+        # Para outros tipos (str, int, etc), converte diretamente
+        temp_content = str(texto)
+    
+    # Processamento de limpeza
+    texto_str: str = temp_content.strip()
+    texto_str = re.sub(r'[\r\n\t]', ' ', texto_str)
+    texto_str = re.sub(r'\s+', ' ', texto_str)
+    
+    return texto_str.strip()
 
-        except Exception as e:
-            if DEBUG:
-                print(f"[DEBUG] Erro ao detectar regime tributário para {cnpj}: {e}")
 
+def normalizar_valor_moeda(valor: Optional[str]) -> Union[float, Any]:
+    """Converte string de moeda (R$ 1.234,56) para float (1234.56)."""
+    if valor is None:
+        return np.nan
+    
+    valor_str: str = str(valor).replace("R$", "").replace("r$", "").strip()
+    valor_str = valor_str.replace('.', '').replace(',', '.').strip()
+    
+    try:
+        return float(valor_str)
+    except ValueError:
+        return np.nan
+
+
+def normalizar_cnpj_cpf(doc: Optional[str]) -> Optional[str]:
+    """Remove pontuações de CNPJ/CPF."""
+    if doc is None:
+        return None
+    
+    doc_clean: str = re.sub(r'[^0-9]', '', str(doc))
+    return doc_clean if len(doc_clean) in [11, 14] else None
+
+
+# ==================== FUNÇÃO DE ENRIQUECIMENTO (CNPJ) ====================
+
+def buscar_nome_empresa_cnpj(cnpj: str) -> Optional[str]:
+    """Busca o nome da empresa usando CNPJ (simulado/cacheado)."""
+    if not cnpj or len(cnpj) != 14:
         return None
 
+    if cnpj in CNPJ_CACHE:
+        return CNPJ_CACHE[cnpj]
 
-    # 1️⃣ Tenta primeiro o destinatário
-    regime = consultar(dest_doc) if dest_doc else None
-
-    # 2️⃣ Fallback: tenta o emitente
-    if not regime and emitente_doc:
-        regime = consultar(emitente_doc)
-
-    # 3️⃣ Se nada encontrado → assume normal
-    return regime or "normal"
-
-# ==================== NOVA FUNÇÃO: EXTRAÇÃO DE ITENS ====================
-
-
-
-
-def extrair_itens_da_tabela(pdf_page) -> List[Dict[str, Any]]:
-    """
-    Extrai itens (produtos/serviços) de DANFE.
-    Estratégia híbrida com heurística de agrupamento:
-      1. Usa pdfplumber para extrair tabelas.
-      2. Reagrupa linhas quebradas com base em colunas numéricas ausentes.
-      3. Fallback OCR posicional se não houver tabela formal.
-    """
-    itens_extraidos: List[Dict[str, Any]] = []
-
-    try:
-        # === 1️⃣ Tentativa: Tabela estruturada com pdfplumber ===
-        tables = pdf_page.extract_tables({
-            "vertical_strategy": "lines",
-            "horizontal_strategy": "lines",
-            "intersection_tolerance": 5,
-            "snap_tolerance": 3,
-            "join_tolerance": 3,
-            "text_x_tolerance": 2,
-            "text_y_tolerance": 2,
-            "edge_min_length": 20
-        })
-
-        for table in tables:
-            if not table or len(table) < 2:
-                continue
-
-            header = [str(c).upper().strip() for c in table[0] if c]
-            if not any("DESCRI" in h or "PRODUTO" in h for h in header):
-                continue
-
-            # =======================
-            # HEURÍSTICA DE AGRUPAMENTO
-            # =======================
-            linhas_itens = []
-            buffer = None  # linha sendo construída
-
-            for row in table[1:]:
-                if not any(row):
-                    continue
-                row = (row + [""] * 12)[:12]
-
-                def to_float(v):
-                    s = str(v).replace(".", "").replace(",", ".").strip()
-                    try:
-                        return float(s)
-                    except:
-                        return None
-
-                valor_total = to_float(row[8])
-                ncm = str(row[2]).strip()
-                cfop = str(row[4]).strip()
-
-                # 🧩 Correção de desalinhamento CFOP/NCM
-                if len(cfop) < 4 and re.match(r"\d{7,8}", ncm):
-                    cfop, ncm = ncm[-4:], ncm[:-4]
-
-                # 🧩 Heurística aprimorada para unir linhas quebradas
-                if (
-                    buffer
-                    and not valor_total
-                    and (not cfop or cfop == buffer.get("cfop"))
-                    and len(str(row[1]).strip()) > 0
-                ):
-                    buffer["descricao"] += " " + str(row[1]).strip()
-                    continue
-
-                # Linha nova
-                if buffer:
-                    linhas_itens.append(buffer)
-
-                buffer = {
-                    "codigo": str(row[0]).strip(),
-                    "descricao": str(row[1]).strip(),
-                    "ncm": ncm,
-                    "cfop": cfop,
-                    "unidade": str(row[5]).strip(),
-                    "quantidade": to_float(row[6]),
-                    "valor_unit": to_float(row[7]),
-                    "valor_total": valor_total,
-                }
-
-
-            # adiciona o último buffer se existir
-            if buffer:
-                linhas_itens.append(buffer)
-
-            # filtra itens válidos
-            for item in linhas_itens:
-                if item.get("descricao") and item.get("valor_total"):
-                    itens_extraidos.append(item)
-
-        # === 2️⃣ Fallback: Texto posicional (caso sem linhas de tabela) ===
-        if not itens_extraidos:
-            words = pdf_page.extract_words()
-            linhas = {}
-            for w in words:
-                y = round(w["top"] / 5) * 5
-                linhas.setdefault(y, []).append(w)
-
-            for _, grupo in sorted(linhas.items()):
-                linha_txt = " ".join([w["text"] for w in grupo])
-                if len(linha_txt) < 10:
-                    continue
-                if any(k in linha_txt.upper() for k in ["CÓDIGO", "PRODUTO", "DESCRIÇÃO", "TOTAL", "ICMS", "IPI"]):
-                    continue
-
-                m_valor = re.search(r"(\d{1,3}(?:[.,]\d{3})*[.,]\d{2,3})", linha_txt)
-                if m_valor:
-                    valor_total = moeda_to_float(m_valor.group(1))
-                    if valor_total and valor_total > 0:
-                        partes = linha_txt.split(m_valor.group(1))
-                        descricao = partes[0].strip()
-                        codigo = None
-                        match_cod = re.match(r"^\d{1,5}", descricao)
-                        if match_cod:
-                            codigo = match_cod.group(0)
-                            descricao = descricao[len(codigo):].strip()
-
-                        if len(descricao) > 4:
-                            itens_extraidos.append({
-                                "codigo": codigo,
-                                "descricao": descricao,
-                                "valor_total": round(valor_total, 2)
-                            })
-
-        if DEBUG:
-            print(f"[DEBUG] Página {pdf_page.page_number}: {len(itens_extraidos)} itens encontrados (agrupamento aplicado)")
-
-        # === 3️⃣ Pós-processamento para limpeza e extração de códigos ===
-        itens_limpos = []
-        for item in itens_extraidos:
-            desc = str(item.get("descricao", "")).upper()
-
-            # Descartar ruídos típicos
-            if any(x in desc for x in ["CNPJ", "ENDEREÇO", "INSCRIÇÃO", "NOTA FISCAL", "VALOR", "DESTINATÁRIO", "EMITENTE"]):
-                continue
-
-            # Filtrar linhas sem valor válido
-            if not item.get("valor_total") or item["valor_total"] <= 0:
-                continue
-
-            # Extração heurística de NCM e CST/CSOSN dentro da descrição
-            if not item.get("ncm"):
-                match_ncm = re.search(r"\b(\d{8})\b", desc)
-                if match_ncm:
-                    item["ncm"] = match_ncm.group(1)
-
-            if not item.get("csosn") and not item.get("ocst"):
-                match_cst = re.search(r"\b(0\d{2}|10|20|30|40|41|50|60|70|90)\b", desc)
-                if match_cst:
-                    item["ocst"] = match_cst.group(1)
-
-            itens_limpos.append(item)
-
-        if DEBUG:
-            print(f"[DEBUG] {len(itens_limpos)} itens válidos após limpeza")
-
-        return itens_limpos
-
-        #return itens_extraidos
-
-    except Exception as e:
-        if DEBUG:
-            print(f"[DEBUG] Erro na extração híbrida de itens: {e}")
-        return []
-
-
-# ==================== CLASSIFICAÇÃO CONTÁBIL AUTOMÁTICA ====================
-
-CLASSIFICACAO_CONTABIL = {
-    "1": "Compra de mercadorias para revenda",
-    "2": "Devolução de compras / ajustes de estoque",
-    "3": "Aquisição de ativo imobilizado",
-    "5": "Prestação de serviços tomados",
-    "6": "Venda de mercadorias ou serviços (receita)",
-    "7": "Transferências internas",
-    "9": "Outras operações (sem impacto contábil direto)",
-}
-
-# NO ARQUIVO extrator.py (SUBSTITUA A FUNÇÃO COMPLETA)
-
-def classificar_contabilmente(cfop: str) -> str:
-    """Retorna a classificação contábil sugerida com base no CFOP."""
-    if not cfop: return "Não identificado"
-    cfop = str(cfop).strip()
-    # Assume que CLASSIFICACAO_CONTABIL existe no escopo global ou está definida acima.
-    if len(cfop) >= 1 and cfop[0] in CLASSIFICACAO_CONTABIL: 
-        return CLASSIFICACAO_CONTABIL[cfop[0]]
-    return "Não identificado"
-
-def enriquecer_itens(itens, uf_destino="BA", regime="simples"):
-    """Usa a biblioteca de códigos fiscais para enriquecer os dados dos itens"""
-    itens_enriquecidos = []
+    # Simulação
+    nome: str
+    if cnpj == "00000000000191":
+        nome = "EMPRESA SIMULADA DE TI LTDA"
+    elif cnpj == "10101010101010":
+        nome = "FORNECEDOR DE MATERIAIS S.A."
+    else:
+        nome = f"CNPJ {cnpj} - Nome Enriquecido"
     
-    # É necessário o 're' importado no topo do extrator.py (já existe)
-    # import re
-    
-    for item in itens:
-        # 1. Extração bruta e segura
-        cfop_bruto = str(item.get("cfop", "")).strip()
-        ncm_bruto = str(item.get("ncm", "")).strip()
-        csosn = str(item.get("csosn", item.get("ocst", ""))).strip()
+    CNPJ_CACHE[cnpj] = nome
+    return nome
 
-        # 2. CONTINGÊNCIA: Tenta extrair CFOP/NCM da descrição se estiverem faltando
+
+# ==================== OCR E PRÉ-PROCESSAMENTO (PyMuPDF) ====================
+
+def ocr_pdf_pymupdf(pdf_path: str) -> str:
+    """Realiza OCR e extração de texto usando PyMuPDF (fitz) para PDFs digitalizados."""
+    documento = fitz.open(pdf_path)
+    texto_completo: List[str] = []
+    
+    for page_num in range(documento.page_count):
+        pagina = documento.load_page(page_num)
         
-        # Tenta extrair NCM (8 dígitos numéricos)
-        if not ncm_bruto and item.get("descricao"):
-            match_ncm = re.search(r'\b(\d{8})\b', item.get("descricao", ""))
-            if match_ncm:
-                 ncm_bruto = match_ncm.group(1)
-
-        # Tenta extrair CFOP (4 dígitos numéricos)
-        if not cfop_bruto and item.get("descricao"):
-            match_cfop = re.search(r'\b(\d{4})\b', item.get("descricao", ""))
-            # Verifica se o 4 dígitos encontrados são CFOP e não parte de outro código
-            if match_cfop and len(match_cfop.group(1)) == 4:
-                 cfop_bruto = match_cfop.group(1)
-
-        # 3. Análise Fiscal com os códigos mais confiáveis
-        try:
-            # Chama a função de análise fiscal com os valores brutos ou contingenciais
-            # A função analisar_nf deve aceitar strings vazias (ex: "" se o código não foi encontrado)
-            analise = analisar_nf(
-                cfop=cfop_bruto,
-                ncm=ncm_bruto,
-                csosn_ou_cst=csosn, # Assume que a função analisar_nf foi atualizada para receber este nome
-                uf_destino=uf_destino,
-                regime=regime
-            )
-            if not isinstance(analise, dict):
-                analise = {}
-        except Exception as e:
-            if DEBUG:
-                print(f"[DEBUG] Falha ao analisar NF item (CFOP={cfop_bruto}, NCM={ncm_bruto}): {e}")
-            analise = {}
-
-        # 4. Extração segura de info (tratando o caso None de retorno da analise)
-        analise_safe = analise if isinstance(analise, dict) else {}
-        cfop_info = analise_safe.get("cfop_info") or {}
-        ncm_info = analise_safe.get("ncm_info") or {}
+        # Extrai texto puro
+        texto_raw: Any = pagina.get_text("text")
+        texto: str = texto_raw if isinstance(texto_raw, str) else ""
         
-        # 5. Atualiza o item com os resultados
-        item.update({
-            # Usa os códigos (brutos/contingenciais) para salvar de volta no item
-            "cfop": cfop_bruto,
-            "ncm": ncm_bruto,
-            
-            # Descrições e Aplicações Fiscais
-            "cfop_desc": cfop_info.get("descricao"),
-            "ncm_desc": ncm_info.get("descricao"),
-            "icms_aplica": cfop_info.get("icms_aplica"),
-            "ipi_aplica": cfop_info.get("ipi_aplica"),
-            
-            # Alíquotas (garante float 0.0 se não encontrado)
-            "aliquota_icms": analise.get("aliquota_icms", 0.0),
-            "aliquota_ipi": analise.get("aliquota_ipi", 0.0),
-            "aliquota_pis": analise.get("aliquota_pis", 0.0),
-            "aliquota_cofins": analise.get("aliquota_cofins", 0.0),
-            
-            # Classificação Contábil
-            "classificacao_contabil": classificar_contabilmente(cfop_bruto)
-        })
-
-        itens_enriquecidos.append(item)
-    return itens_enriquecidos
-
-# ==================== FUNÇÕES DE EXTRAÇÃO (ADAPTADAS) ====================
-
-def extrair_capa_de_texto(texto: str) -> dict:
-    
-    numero_nf: Optional[str] = None
-    serie: Optional[str] = None
-    emitente_doc: Optional[str] = None
-    emitente_nome: Optional[str] = None
-    dest_nome: Optional[str] = None
-    dest_doc: Optional[str] = None
-    data_emissao: Optional[str] = None
-    valor_total: Optional[str] = None
-
-    linhas = texto.split("\n")
-
-    # -------- NF Número/Série --------
-    for ln in linhas:
-        if not numero_nf:
-            m = re.search(r"N[°ºO]\.\s*[:\-]?\s*(\d{3}\.\d{3}\.\d{3,6})", ln)
-            if m:
-                cand = m.group(1).replace(".", "")
-                try:
-                    val = int(cand)
-                    numero_nf = str(val % 1000000).lstrip("0") or "0"
-                except:
-                    pass
-            if not numero_nf:
-                m = re.search(r"N[°ºO]\s*[:\-]?\s*(\d{1,6})(?:\D|$)", ln)
-                if m:
-                    cand = m.group(1)
-                    try:
-                        val = int(cand)
-                        if 1 <= val <= 999999:
-                            numero_nf = str(val)
-                    except:
-                        pass
-        if not serie:
-            m = RE_SERIE.search(ln)
-            if m:
-                serie = m.group(1)
-            if not serie:
-                m = RE_SERIE_ALT.search(ln)
-                if m:
-                    serie = m.group(1)
-
-    # -------- EMITENTE --------
-    if emitente_doc is None:
-        cnpjs = re.findall(r"\b\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}\b", texto)
-        if cnpjs:
-            emitente_doc = cnpjs[0]
-            if emitente_doc is not None:
-                idx = texto.find(emitente_doc)
-                if idx != -1:
-                    trecho_antes = texto[max(0, idx-150):idx].strip()
-                    linhas_antes = trecho_antes.split("\n")
-                    for linha in reversed(linhas_antes):
-                        linha_limpa = linha.strip()
-                        if linha_limpa and not any(k in linha_limpa.upper() for k in ["CNPJ", "CPF", "ENDEREÇO", "RAZÃO", "NOTA", "EMITENTE"]):
-                            alpha_count = sum(c.isalpha() for c in linha_limpa)
-                            if alpha_count >= max(3, len(linha_limpa) // 2):
-                                emitente_nome = linha_limpa
-                                break
-
-    # Sempre atualiza emitente_nome pelo nome oficial da API (se emitente_doc presente)
-    if emitente_doc is not None:
-        nome_api = consulta_cnpj_api(emitente_doc)
-        if nome_api:
-            emitente_nome = nome_api
-
-
-    # -------- DESTINATÁRIO --------
-    for i, ln in enumerate(linhas):
-        up = ln.upper()
-        if "DESTINATÁRIO" in up or "REMETENTE" in up:
-            for j in range(i + 1, min(i + 6, len(linhas))):
-                linha_dest = linhas[j]
-                doc_dest = achar_doc_em_linha(linha_dest)
-                if doc_dest and len(somente_digitos(doc_dest)) == 14:
-                    dest_doc = doc_dest
-                    partes = linha_dest.split(doc_dest)
-                    if partes[0].strip():
-                        dest_nome = partes[0].strip()
-
-    # -------- DATA DE EMISSÃO --------
-    for ln in linhas:
-        if not data_emissao:
-            md = RE_DATA.search(ln)
-            if md:
-                dd, mm, yyyy = md.group(0).split("/")
-                try:
-                    if 2006 <= int(yyyy) <= 2035:
-                        data_emissao = md.group(0)
-                except:
-                    pass
-
-    # -------- VALOR TOTAL --------
-    for i, ln in enumerate(linhas):
-        up = ln.upper()
-        if "VALOR TOTAL DA NOTA" in up:
-            v = pick_last_money_on_same_or_next_lines(linhas, i, 3)
-            if v:
-                valor_total = v
-                break
-        if not valor_total and "V. TOTAL" in up and "PRODUTOS" in up:
-            v = pick_last_money_on_same_or_next_lines(linhas, i, 2)
-            if v:
-                valor_total = v
-
-    resultado = {
-        "numero_nf": numero_nf,
-        "serie": serie,
-        "emitente_doc": emitente_doc,
-        "emitente_nome": emitente_nome,
-        "dest_doc": dest_doc,
-        "dest_nome": dest_nome,
-        "data_emissao": data_emissao,
-        "valor_total": valor_total,
-        "valor_total_num": moeda_to_float(valor_total),
-    }
-    return resultado
-
-
-def extrair_texto_ocr(arquivo_pdf, progress_callback=None):
-    # ... (Seu código existente para OCR, mantido)
-    global EASY_OCR
-    if EASY_OCR is None:
-        EASY_OCR = carregar_easy_ocr()
-        if EASY_OCR is None:
-            raise Exception("EasyOCR não está instalado ou configurado.")
-
-    texto_total = ""
-    doc = fitz.open(arquivo_pdf)
-    for page_num in range(len(doc)):
-        page = doc.load_page(page_num)
-        pix = page.get_pixmap(dpi=300)
-        img = Image.open(io.BytesIO(pix.tobytes()))
-        result = EASY_OCR.readtext(np.array(img), detail=0, paragraph=True)
-        if isinstance(result, list):
-            textos = []
-            for item in result:
-                if isinstance(item, str):
-                    textos.append(item)
-                elif isinstance(item, (list, tuple)) and len(item) >= 2:
-                    textos.append(str(item[1]))
-                elif isinstance(item, dict) and "text" in item:
-                    textos.append(item["text"])
-            texto_page = " ".join(textos)
-        else:
-            texto_page = str(result)
-
-        texto_total += texto_page + "\n"
-
-        if progress_callback:
-            progress_callback(f"OCR: página {page_num+1}/{len(doc)}")
-
-    return texto_total
-
-# FUNÇÃO PRINCIPAL ADAPTADA para retornar ITENS
-
-def extrair_capa_de_pdf(arquivo_pdf: str, progress_callback=None) -> dict:
-    nome_arquivo = Path(arquivo_pdf).name
-    itens: List[Dict[str, Any]] = []
-    dados = {}
-
-    try:
-        with pdfplumber.open(arquivo_pdf) as pdf:
-            capa_encontrada = False
-
-            for page in pdf.pages:
-                # === 1️⃣ Extrai itens estruturados da página ===
-                try:
-                    pagina_itens = extrair_itens_da_tabela(page)
-                    if pagina_itens:
-                        itens.extend(pagina_itens)
-                except Exception as e:
-                    if DEBUG:
-                        print(f"[DEBUG] Falha ao extrair itens da Pág {page.page_number} de {nome_arquivo}: {e}")
-
-                # === 2️⃣ Extrai capa (geralmente na primeira página) ===
-                if not capa_encontrada:
-                    txt = page.extract_text() or ""
-                    if txt and len(txt.strip()) > 100:
-                        dados_capa = extrair_capa_de_texto(txt) or {}
-                        if isinstance(dados_capa, dict) and dados_capa.get("numero_nf"):
-                                dados = dados_capa
-                                capa_encontrada = True
-
-
-
-            # === 3️⃣ Detecta regimes tributários separadamente ===
-            regime_destinatario = detectar_regime_tributario(
-                dest_doc=dados.get("dest_doc"),
-                emitente_doc=dados.get("emitente_doc")
-            )
-
-            regime_emitente = detectar_regime_tributario(
-                dest_doc=dados.get("emitente_doc")
-            )
-
-            # Salva ambos no dicionário principal
-            dados["regime_destinatario"] = regime_destinatario
-            dados["regime_emitente"] = regime_emitente
-
-            # === 4️⃣ Define o regime final conforme combinação ===
-            if regime_destinatario == "normal" and regime_emitente == "simples":
-                regime_final = "normal"
-            elif regime_destinatario == "simples" and regime_emitente == "normal":
-                regime_final = "misto"
-            else:
-                regime_final = regime_destinatario or regime_emitente or "normal"
-
-            dados["regime_final"] = regime_final
-
-            # === 5️⃣ Enriquecimento fiscal automático (corrigindo CFOP e NCM) ===
-            if itens:
-                itens_corrigidos = []
-                for item in itens:
-                    cfop = str(item.get("cfop", "")).replace(".", "").replace(",", "").strip()
-                    ncm = str(item.get("ncm", "")).replace(".", "").replace(",", "").strip()
-                    item["cfop"] = cfop
-                    item["ncm"] = ncm
-                    itens_corrigidos.append(item)
-
-                itens = enriquecer_itens(itens_corrigidos, uf_destino="BA", regime=regime_final)
-
-            # === 6️⃣ Análise fiscal detalhada (destinatário) ===
+        # Se texto curto, tenta OCR
+        if len(texto.strip()) < 50:
             try:
-                if itens:
-                    analise = analisar_nf_como_destinatario(
-                    cfop=str(itens[0].get("cfop", "")),
-                    ncm=str(itens[0].get("ncm", "")),
-                    csosn_ou_cst_recebido=str(itens[0].get("csosn", itens[0].get("ocst", ""))),
-                    regime_destinatario=regime_destinatario or "normal",
-                    regime_emitente=regime_emitente or "normal",
-                    uf_origem="BA",
-                    valor_total=dados.get("valor_total_num", 0.0)
-)
-
-                    
-                    dados["analise_destinatario"] = analise
-                    dados["resumo_analise"] = gerar_resumo_analise(analise)
-            except Exception as e:
-                if DEBUG:
-                    print(f"[DEBUG] Erro ao analisar NF como destinatário: {e}")
-
-            # === Log para debug ===
-            if DEBUG:
-                print(f"[DEBUG] Regimes detectados → Emitente: {regime_emitente}, Destinatário: {regime_destinatario}, Final: {regime_final}")
-
-            # === 7️⃣ Retorna resultado consolidado ===
-            if capa_encontrada or itens:
-                if progress_callback:
-                    status = "✅" if capa_encontrada else "⚠️"
-                    progress_callback(f"{status} pdfplumber: {nome_arquivo} ({len(itens)} itens encontrados)")
-                return {"arquivo": nome_arquivo, **dados, "itens_nf": itens}
-
-    except Exception as e:
-        if DEBUG:
-            print(f"[DEBUG] Erro catastrófico em pdfplumber para {nome_arquivo}: {e}")
-            traceback.print_exc()
-
-    # === 8️⃣ Fallback OCR ===
-    try:
-        if progress_callback:
-            progress_callback(f"🔄 OCR: {nome_arquivo}")
-        texto_ocr = extrair_texto_ocr(arquivo_pdf, progress_callback)
-        if texto_ocr and len(texto_ocr.strip()) > 100:
-            dados = extrair_capa_de_texto(texto_ocr)
-            if any([dados.get("numero_nf"), dados.get("emitente_doc"), dados.get("valor_total")]):
-                if progress_callback:
-                    progress_callback(f"✅ OCR: {nome_arquivo}")
-                return {"arquivo": nome_arquivo, **dados, "itens_nf": []}
-    except Exception as e:
-        if progress_callback:
-            progress_callback(f"❌ Erro OCR/Extração: {e}")
-
-    vazio = {k: None for k in [
-        "numero_nf","serie","emitente_doc","emitente_nome",
-        "dest_doc","dest_nome","data_emissao","valor_total","valor_total_num"
-    ]}
-    return {"arquivo": nome_arquivo, **vazio, "itens_nf": []}
+                texto_ocr_raw: Any = pagina.get_text(
+                    "text",
+                    flags=fitz.TEXT_PRESERVE_WHITESPACE | fitz.TEXT_PRESERVE_LIGATURES
+                )
+                texto_ocr: str = texto_ocr_raw if isinstance(texto_ocr_raw, str) else ""
+                if len(texto_ocr.strip()) > len(texto.strip()):
+                    texto = texto_ocr
+            except Exception:
+                pass
+                
+        texto_completo.append(texto)
+        
+    documento.close()
+    return "\n".join(texto_completo)
 
 
-# =============== FUNÇÕES DE PROCESSAMENTO (ADAPTADAS) ===============
+# ==================== EXTRAÇÃO PRINCIPAL (PDFPLUMBER/RE) ====================
 
-@st.cache_data(show_spinner=False, ttl=86400)
-def processar_pdfs(arquivos_pdf: list, _progress_callback=None) -> pd.DataFrame:
+def extrair_dados_nf(pdf_path: str, enriquecer_cnpj: bool = True) -> Dict[str, Any]:
     """
-    Processa múltiplos PDFs com cache híbrido:
-      - Streamlit cache (24h)
-      - Disco cache (permanente)
-      - Memória (em execução)
+    Função principal para extrair dados de uma única NF-e em PDF.
     """
-    carregar_cache_cnpj()
+    
+    hash_pdf: str = get_pdf_hash(pdf_path)
+    cached_data: Optional[Dict[str, Any]] = carregar_cache_nf(hash_pdf)
+    
+    if cached_data:
+        cached_data["arquivo"] = Path(pdf_path).name 
+        return cached_data
 
-    regs = []
+    dados: Dict[str, Any] = {
+        "arquivo": Path(pdf_path).name,
+        "status": "FALHA NA EXTRAÇÃO"
+    }
+    
+    # 1. Extração de texto
+    texto_completo: str = ocr_pdf_pymupdf(pdf_path)
+    
+    if not texto_completo.strip():
+        with pdfplumber.open(pdf_path) as pdf:
+            texto_completo = "\n".join(
+                page.extract_text() or "" for page in pdf.pages
+            )
+    
+    dados["texto_completo"] = limpar_string(texto_completo)
 
-    for i, pdf_path in enumerate(arquivos_pdf, 1):
-        nome = Path(pdf_path).name
-        if _progress_callback:
-            _progress_callback(f"[{i}/{len(arquivos_pdf)}] {nome}")
-
-        # === 1️⃣ Gera hash e tenta carregar cache ===
-        hash_pdf = get_pdf_hash(pdf_path)
-        cached = carregar_cache_nf(hash_pdf)
-        if cached:
-            if _progress_callback:
-                _progress_callback(f"⚡ Loaded from cache: {nome}")
-            regs.append(cached)
-            continue
-
-        # === 2️⃣ Se não houver cache, processa normalmente ===
+    if not dados["texto_completo"]:
+        salvar_cache_nf(hash_pdf, dados)
+        return dados
+    
+    # 2. Extração usando Regex
+    
+    # Número e série da NF
+    nf_match = re.search(
+        r'Nº\s+(\d+)\s+Série\s+(\d+)',
+        dados["texto_completo"],
+        re.IGNORECASE
+    )
+    if nf_match:
+        dados["numero_nf"] = limpar_string(nf_match.group(1))
+        dados["serie"] = limpar_string(nf_match.group(2))
+        
+    # Data de emissão
+    data_match = re.search(
+        r'Data de Emissão:\s*(\d{2}/\d{2}/\d{4}|\d{4}-\d{2}-\d{2})',
+        dados["texto_completo"],
+        re.IGNORECASE
+    )
+    if data_match:
+        data_str: str = data_match.group(1).replace('-', '/')
+        dados["data_emissao"] = limpar_string(data_str)
         try:
-            data = extrair_capa_de_pdf(pdf_path, _progress_callback)
-            regs.append(data)
-            salvar_cache_nf(hash_pdf, data)
+            dados["data_emissao_obj"] = datetime.strptime(
+                data_str, '%d/%m/%Y'
+            ).strftime('%Y-%m-%d')
+        except ValueError:
+            dados["data_emissao_obj"] = None
+
+    # Valor total
+    valor_match = re.search(
+        r'(?:VALOR TOTAL DA NOTA|TOTAL DA NOTA|VALOR TOTAL NF|TOTAL DA NF)[^\d]*R?\$\s*(\d{1,3}(?:\.\d{3})*,\d{2})',
+        dados["texto_completo"],
+        re.IGNORECASE
+    )
+    if valor_match:
+        valor_str: str = valor_match.group(1)
+        dados["valor_total"] = limpar_string(valor_str)
+        dados["valor_total_num"] = normalizar_valor_moeda(valor_str)
+    
+    # CNPJs
+    cnpj_matches: List[str] = re.findall(
+        r'\b(\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2})\b',
+        dados["texto_completo"]
+    )
+    
+    # CNPJ do Emitente
+    cnpj_emit_match = re.search(
+        r'(?:CNPJ|CPF|INSCRIÇÃO)\s*DO\s*EMITENTE:\s*(\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2})',
+        dados["texto_completo"],
+        re.IGNORECASE
+    )
+    
+    if cnpj_emit_match:
+        dados["emitente_doc"] = normalizar_cnpj_cpf(cnpj_emit_match.group(1))
+    elif cnpj_matches:
+        dados["emitente_doc"] = normalizar_cnpj_cpf(cnpj_matches[0])
+        
+    # CNPJ do Destinatário
+    cnpj_dest_match = re.search(
+        r'(?:CNPJ|CPF|INSCRIÇÃO)\s*DO\s*DESTINATÁRIO:\s*(\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2})',
+        dados["texto_completo"],
+        re.IGNORECASE
+    )
+    
+    if cnpj_dest_match:
+        dados["dest_doc"] = normalizar_cnpj_cpf(cnpj_dest_match.group(1))
+    elif len(cnpj_matches) > 1:
+        dados["dest_doc"] = normalizar_cnpj_cpf(cnpj_matches[1])
+
+    # 3. Enriquecimento de Nomes - CORRIGIDO PARA PYLANCE
+    if enriquecer_cnpj:
+        emitente_doc: Optional[str] = dados.get("emitente_doc")
+        if emitente_doc and isinstance(emitente_doc, str):
+            nome_emit: Optional[str] = buscar_nome_empresa_cnpj(emitente_doc)
+            if nome_emit:
+                dados["emitente_nome"] = nome_emit
+        
+        dest_doc: Optional[str] = dados.get("dest_doc")
+        if dest_doc and isinstance(dest_doc, str):
+            nome_dest: Optional[str] = buscar_nome_empresa_cnpj(dest_doc)
+            if nome_dest:
+                dados["dest_nome"] = nome_dest
+            
+    # Fallback
+    if not dados.get("emitente_nome"):
+        dados["emitente_nome"] = "Emitente não encontrado"
+
+    if not dados.get("dest_nome"):
+        dados["dest_nome"] = "Destinatário não encontrado"
+    
+    # 4. Dados fiscais
+    cfop_match = re.search(r'CFOP:\s*(\d{4})', dados["texto_completo"], re.IGNORECASE)
+    if cfop_match:
+        dados["cfop"] = cfop_match.group(1)
+
+    cst_match = re.search(r'CST:\s*(\d{3})', dados["texto_completo"], re.IGNORECASE)
+    if cst_match:
+        dados["cst"] = cst_match.group(1)
+        
+    csosn_match = re.search(r'CSOSN:\s*(\d{4})', dados["texto_completo"], re.IGNORECASE)
+    if csosn_match:
+        dados["csosn"] = csosn_match.group(1)
+        
+    ncm_match = re.search(r'NCM:\s*(\d{8})', dados["texto_completo"], re.IGNORECASE)
+    if ncm_match:
+        dados["ncm"] = ncm_match.group(1)
+    
+    # Status de sucesso
+    valor_num: Union[float, Any] = dados.get("valor_total_num")
+    if dados.get("numero_nf") and valor_num is not np.nan:
+        dados["status"] = "SUCESSO"
+        
+    # 5. Salva no cache
+    salvar_cache_nf(hash_pdf, dados)
+    return dados
+
+
+# ==================== PROCESSAMENTO DE MÚLTIPLOS PDFS ====================
+
+def processar_pdfs(
+    pdf_paths: List[str],
+    _progress_callback: Optional[Any] = None
+) -> pd.DataFrame:
+    """
+    Processa uma lista de caminhos de PDFs e retorna um DataFrame com os resultados.
+    """
+    if not pdf_paths:
+        return pd.DataFrame()
+    
+    notas_fiscais_extraidas: List[Dict[str, Any]] = []
+
+    for i, pdf_path in enumerate(pdf_paths):
+        
+        nome_arquivo: str = Path(pdf_path).name
+        
+        if _progress_callback:
+            total_files: int = len(pdf_paths)
+            message: str = f"Processando arquivo {i+1} de {total_files}: {nome_arquivo}"
+            _progress_callback(message)
+
+        try:
+            dados_nf: Dict[str, Any] = extrair_dados_nf(pdf_path)
+            notas_fiscais_extraidas.append(dados_nf)
+            
+            if _progress_callback:
+                _progress_callback(f"✅ Extração de {nome_arquivo} concluída.")
+
         except Exception as e:
-            if DEBUG:
-                print(f"[DEBUG] Falha ao processar {nome}: {e}")
+            dados_falha: Dict[str, Any] = {
+                "arquivo": nome_arquivo,
+                "status": "ERRO INTERNO",
+                "detalhe_erro": str(e),
+                "traceback": traceback.format_exc(),
+            }
+            notas_fiscais_extraidas.append(dados_falha)
+            
+            if _progress_callback:
+                _progress_callback(f"❌ Falha crítica em {nome_arquivo}: {str(e)}")
 
-    # === 3️⃣ Gera DataFrame consolidado ===
-    df = pd.DataFrame(regs).drop_duplicates(subset=["arquivo"], keep="first")
-
-    # === 4️⃣ Limpeza e padronização ===
-    for col in ["emitente_nome", "dest_nome"]:
-        if col in df.columns:
-            df[col] = df[col].fillna('').astype(str)
-
-    if "valor_total_num" in df.columns:
-        df["valor_total_num"] = pd.to_numeric(df["valor_total_num"], errors="coerce")
-
-    if "data_emissao" in df.columns:
-        df["_ordem"] = pd.to_datetime(df["data_emissao"], format="%d/%m/%Y", errors="coerce")
-        df = df.sort_values(by=["_ordem", "numero_nf"], ascending=[True, True])
-        df = df.drop(columns=["_ordem"])
-
-    salvar_cache_cnpj()
-
-    return df
+    if notas_fiscais_extraidas:
+        df_resultados: pd.DataFrame = pd.DataFrame(notas_fiscais_extraidas)
+        return df_resultados
+    else:
+        return pd.DataFrame()
 
 
+# ==================== FUNÇÕES DE EXPORTAÇÃO ====================
 
-
-def exportar_para_excel(df: pd.DataFrame) -> bytes:
-    # Remove a coluna 'itens_nf' para exportação, pois contém listas de dicts
-    df_export = df.drop(columns=['itens_nf'], errors='ignore')
-    output = io.BytesIO()
-    df_export.to_excel(output, index=False, engine='openpyxl')
-    output.seek(0)
-    return output.getvalue()
-
-def exportar_para_excel_com_itens(df: pd.DataFrame) -> bytes:
-    """Exporta o DataFrame principal, a lista de itens e o resumo fiscal para um arquivo Excel com abas."""
-    output = io.BytesIO()
-
+def exportar_para_excel_com_itens(df_nfs: pd.DataFrame) -> bytes:
+    """
+    Exporta o DataFrame de notas fiscais para um arquivo Excel
+    com várias abas (NFs e Análise Fiscal).
+    """
+    output: io.BytesIO = io.BytesIO()
+    
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         
-        # 1. Aba Principal (Notas Fiscais)
-        # Removendo colunas complexas para a aba principal
-        df_principal = df.drop(columns=["analise_destinatario", "resumo_analise", "itens_nf"], errors='ignore')
-        df_principal.to_excel(writer, sheet_name='Notas Fiscais', index=False)
+        # 1. Aba de Notas Fiscais
+        df_nfs.to_excel(writer, sheet_name='Notas Fiscais', index=False)
 
-        # Aba de itens
-        todas_linhas = []
-        for _, row in df.iterrows():
-            if isinstance(row.get("itens_nf"), list):
-                for item in row["itens_nf"]:
-                    todas_linhas.append({
-                        "arquivo": row["arquivo"],
-                        "numero_nf": row.get("numero_nf"),
-                        "emitente_nome": row.get("emitente_nome"),
-                        "data_emissao": row.get("data_emissao"),
-                        "valor_nf": row.get("valor_total_num"),
-                        "regime_emit": row.get("regime_emit"),
-                        "regime_dest": row.get("regime_dest"),
-                        "regime_final": row.get("regime_final"),
-                        **item
-                    })
-        if todas_linhas:
-            pd.DataFrame(todas_linhas).to_excel(writer, sheet_name="Itens Detalhados", index=False)
+        # 2. Aba de Análise Fiscal
+        analises: List[Dict[str, Any]] = []
+        
+        for _, row in df_nfs.iterrows():
+            
+            regime_destinatario: str = str(row.get("regime_dest", "normal"))
+            regime_emitente: str = str(row.get("regime_emit", "simples"))
+            
+            try:
+                analise: Dict[str, Any] = analisar_nf_como_destinatario(
+                    cfop=str(row.get("cfop", "")),
+                    ncm=str(row.get("ncm", "")),
+                    csosn_ou_cst_recebido=str(row.get("csosn") or row.get("cst") or ""),
+                    regime_destinatario=regime_destinatario,
+                    regime_emitente=regime_emitente,
+                    uf_origem="BA",
+                    valor_total=float(row.get("valor_total_num", 0.0))
+                )
+            except Exception:
+                analise = {
+                    "conformidade": "ERRO",
+                    "credito_icms": {"valor": 0.0, "direito": False},
+                    "credito_pis": {"valor": 0.0, "direito": False},
+                    "credito_cofins": {"valor": 0.0, "direito": False}
+                }
 
-        # Aba de análises fiscais
-        analises = []
-        for _, row in df.iterrows():
-            analise = row.get("analise_destinatario")
-            if isinstance(analise, dict):
-                analises.append({
-                    "arquivo": row["arquivo"],
-                    "numero_nf": row.get("numero_nf"),
-                    "emitente_nome": row.get("emitente_nome"),
-                    "dest_nome": row.get("dest_nome"),
-                    "regime_emit": row.get("regime_emit"),
-                    "regime_dest": row.get("regime_dest"),
-                    "conformidade": analise.get("conformidade"),
-                    "credito_icms": analise["credito_icms"]["valor"] if analise.get("credito_icms") else None,
-                    "credito_pis": analise["credito_pis"]["valor"] if analise.get("credito_pis") else None,
-                    "credito_cofins": analise["credito_cofins"]["valor"] if analise.get("credito_cofins") else None,
-                    #   "resumo_analise": row.get("resumo_analise"),
-                })
+            credito_icms: float = 0.0
+            credito_pis: float = 0.0
+            credito_cofins: float = 0.0
+            
+            if analise.get("credito_icms"):
+                credito_icms = float(analise["credito_icms"].get("valor", 0.0))
+            if analise.get("credito_pis"):
+                credito_pis = float(analise["credito_pis"].get("valor", 0.0))
+            if analise.get("credito_cofins"):
+                credito_cofins = float(analise["credito_cofins"].get("valor", 0.0))
+            
+            analises.append({
+                "arquivo": str(row.get("arquivo", "")),
+                "numero_nf": str(row.get("numero_nf", "")),
+                "emitente_nome": str(row.get("emitente_nome", "")),
+                "dest_nome": str(row.get("dest_nome", "")),
+                "regime_emit": regime_emitente,
+                "regime_dest": regime_destinatario,
+                "conformidade": str(analise.get("conformidade", "DESCONHECIDO")),
+                "credito_icms": credito_icms,
+                "credito_pis": credito_pis,
+                "credito_cofins": credito_cofins,
+            })
+        
         if analises:
             pd.DataFrame(analises).to_excel(writer, sheet_name="Análise Fiscal", index=False)
 
     output.seek(0)
     return output.getvalue()
 
-def gerar_relatorio_pdf(df_resumo):
+
+def gerar_relatorio_pdf(df_resumo: pd.DataFrame) -> None:
+    """Gera relatório PDF a partir do DataFrame."""
     from fpdf import FPDF
 
-    pdf = FPDF()
+    pdf: FPDF = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", "B", 14)
     pdf.cell(0, 10, "Resumo da Análise Fiscal", ln=True, align="C")
@@ -976,8 +451,24 @@ def gerar_relatorio_pdf(df_resumo):
 
     for i, row in df_resumo.iterrows():
         for col, val in row.items():
-            pdf.cell(0, 8, f"{col}: {val}", ln=True)
+            
+            val_str: str = str(val)
+            
+            if isinstance(val, (bytes, bytearray)):
+                try:
+                    val_str = val.decode('utf-8')
+                except UnicodeDecodeError:
+                    val_str = f"<{val.__class__.__name__} - {len(val)} bytes (Não Imprimível)>"
+            
+            pdf.cell(0, 8, f"{col}: {val_str}", ln=True)
+
         pdf.ln(5)
 
     pdf.output("resumo_analise.pdf")
     st.success("📄 PDF gerado com sucesso: resumo_analise.pdf")
+
+
+# ==================== MAIN ====================
+
+if __name__ == "__main__":
+    print("Módulo extrator carregado. Execute via Streamlit.")
