@@ -18,6 +18,7 @@ import json
 import traceback
 import hashlib
 import time
+import requests
 from pathlib import Path
 from datetime import datetime
 
@@ -179,6 +180,76 @@ def pick_last_money_on_same_or_next_lines(linhas: List[str], idx: int, max_ahead
     return None
 
 
+# ==================== CONSULTA DE CNPJ (ENRIQUECIMENTO) ====================
+
+CACHE_CNPJ_FILE = "cache_cnpj.json"
+
+def carregar_cache_cnpj() -> Dict[str, Optional[str]]:
+    """Carrega cache persistente de CNPJs"""
+    if os.path.exists(CACHE_CNPJ_FILE):
+        try:
+            with open(CACHE_CNPJ_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def salvar_cache_cnpj(cache: Dict[str, Optional[str]]) -> None:
+    """Salva cache persistente de CNPJs"""
+    try:
+        with open(CACHE_CNPJ_FILE, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def consulta_cnpj_api(cnpj: str, cache: Dict[str, Optional[str]]) -> Optional[str]:
+    """
+    Consulta nome empresarial do CNPJ usando ReceitaWS e BrasilAPI como fallback.
+    """
+    cnpj_digits = re.sub(r'[^0-9]', '', cnpj)
+    
+    if len(cnpj_digits) != 14:
+        return None
+    
+    # Verifica cache
+    if cnpj_digits in cache:
+        return cache[cnpj_digits]
+    
+    nome_empresarial = None
+    
+    # 1️⃣ Tenta ReceitaWS
+    try:
+        url = f"https://www.receitaws.com.br/v1/cnpj/{cnpj_digits}"
+        response = requests.get(url, timeout=5)
+        
+        if response.status_code == 200:
+            data = response.json()
+            if isinstance(data, dict) and data.get("status") == "OK":
+                nome_empresarial = data.get("nome")
+    except Exception:
+        pass
+    
+    # 2️⃣ Fallback: BrasilAPI
+    if not nome_empresarial:
+        try:
+            url_brasil = f"https://brasilapi.com.br/api/cnpj/v1/{cnpj_digits}"
+            resp = requests.get(url_brasil, timeout=5)
+            
+            if resp.status_code == 200:
+                data_brasil = resp.json()
+                nome_empresarial = data_brasil.get("razao_social") or data_brasil.get("nome_fantasia")
+        except Exception:
+            pass
+    
+    # Atualiza cache
+    cache[cnpj_digits] = nome_empresarial
+    salvar_cache_cnpj(cache)
+    
+    return nome_empresarial
+
+
 # ==================== EXTRAÇÃO DE TEXTO ====================
 
 def extrair_texto_pdfplumber(pdf_path: str) -> str:
@@ -308,27 +379,38 @@ def extrair_cnpj_emitente(texto: str) -> Optional[str]:
 
 
 def extrair_nome_emitente(texto: str, cnpj_emit: Optional[str]) -> Optional[str]:
-    """Extrai nome do emitente"""
+    """Extrai nome do emitente - melhorado com busca por IDENTIFICAÇÃO DO EMITENTE"""
     if not cnpj_emit:
         return None
     
+    linhas = texto.split("\n")
+    
+    # Estratégia 1: Procura pela label "IDENTIFICAÇÃO DO EMITENTE" ou "EMITENTE"
+    for i, ln in enumerate(linhas):
+        if "IDENTIFICAÇÃO DO EMITENTE" in ln.upper():
+            for j in range(i + 1, min(i + 5, len(linhas))):
+                nome_cand = linhas[j].strip()
+                if (nome_cand and 
+                    len(nome_cand) > 5 and 
+                    nome_cand.upper() not in ["DANFE", "DOCUMENTO AUXILIAR DA NOTA FISCAL ELETRÔNICA"] and
+                    not any(k in nome_cand.upper() for k in ["CNPJ", "ENDEREÇO", "CEP", "FONE"])):
+                    return nome_cand
+    
+    # Estratégia 2: Procura antes do CNPJ (fallback original)
     idx = texto.find(cnpj_emit)
-    if idx == -1:
-        return None
-    
-    # Procura antes do CNPJ
-    trecho_antes = texto[max(0, idx - 200):idx].strip()
-    linhas_antes = trecho_antes.split("\n")
-    
-    for linha in reversed(linhas_antes):
-        linha_limpa = linha.strip()
-        if (linha_limpa and 
-            not any(k in linha_limpa.upper() for k in ["CNPJ", "CPF", "ENDEREÇO", "RAZÃO", "NOTA", "EMITENTE"]) and
-            len(linha_limpa) > 5):
-            
-            alpha_count = sum(c.isalpha() for c in linha_limpa)
-            if alpha_count >= max(3, len(linha_limpa) // 2):
-                return linha_limpa
+    if idx != -1:
+        trecho_antes = texto[max(0, idx - 300):idx].strip()
+        linhas_antes = trecho_antes.split("\n")
+        
+        for linha in reversed(linhas_antes):
+            linha_limpa = linha.strip()
+            if (linha_limpa and 
+                not any(k in linha_limpa.upper() for k in ["CNPJ", "CPF", "ENDEREÇO", "RAZÃO", "NOTA", "EMITENTE", "DANFE", "ELETR"]) and
+                len(linha_limpa) > 5):
+                
+                alpha_count = sum(c.isalpha() for c in linha_limpa)
+                if alpha_count >= max(3, len(linha_limpa) // 2):
+                    return linha_limpa
     
     return None
 
@@ -365,21 +447,21 @@ def extrair_cnpj_destinatario(texto: str) -> Optional[str]:
 
 
 def extrair_valor_total(texto: str) -> Optional[str]:
-    """Extrai valor total da NF"""
+    """Extrai valor total da NF - prioriza VALOR TOTAL DA NOTA"""
     linhas = texto.split("\n")
     
     for i, ln in enumerate(linhas):
         up = ln.upper()
         
-        # Procura por "VALOR TOTAL DA NOTA"
-        if "VALOR TOTAL DA NOTA" in up or "VALOR TOTAL NF" in up or "TOTAL DA NOTA" in up:
-            v = pick_last_money_on_same_or_next_lines(linhas, i, 3)
+        # Padrão principal: "VALOR TOTAL DA NOTA"
+        if "VALOR TOTAL DA NOTA" in up:
+            v = pick_last_money_on_same_or_next_lines(linhas, i, 1)
             if v:
                 return v
         
-        # Procura por "V. TOTAL"
-        if "V. TOTAL" in up and "PRODUTOS" in up:
-            v = pick_last_money_on_same_or_next_lines(linhas, i, 2)
+        # Padrão alternativo: "VALOR TOTAL" sozinho (não tributos)
+        if re.search(r"^\s*VALOR\s+TOTAL\s*$", up):
+            v = pick_last_money_on_same_or_next_lines(linhas, i, 1)
             if v:
                 return v
     
@@ -462,15 +544,25 @@ def extrair_dados_nf(
     dados["valor_total"] = valor_total_str
     dados["valor_total_num"] = normalizar_valor_moeda(valor_total_str) if valor_total_str else np.nan
     
-    # 3. STATUS DE SUCESSO
-    try:
-        valor_valido = not (isinstance(dados.get("valor_total_num"), float) and 
-                          np.isnan(dados.get("valor_total_num", np.nan)))
-    except (TypeError, ValueError):
-        valor_valido = False
-    
-    if dados.get("numero_nf") and valor_valido:
-        dados["status"] = "SUCESSO"
+    # 3.5 ENRIQUECIMENTO COM CNPJ (opcional)
+    if enriquecer_cnpj:
+        cache_cnpj = carregar_cache_cnpj()
+        
+        # Enriquece emitente
+        if dados.get("emitente_doc"):
+            emitente_doc = dados.get("emitente_doc")
+            if emitente_doc and not dados.get("emitente_nome"):
+                nome_emit = consulta_cnpj_api(emitente_doc, cache_cnpj)
+                if nome_emit:
+                    dados["emitente_nome"] = nome_emit
+        
+        # Enriquece destinatário
+        if dados.get("dest_doc"):
+            dest_doc = dados.get("dest_doc")
+            if dest_doc and not dados.get("dest_nome"):
+                nome_dest = consulta_cnpj_api(dest_doc, cache_cnpj)
+                if nome_dest:
+                    dados["dest_nome"] = nome_dest
     
     # 4. EXTRAÇÃO COM IA (dados complexos - OPCIONAL)
     dados["extracao_ia"] = False
@@ -484,7 +576,6 @@ def extrair_dados_nf(
                 
                 dados["itens"] = resultado_ia.get("itens", [])
                 dados["impostos"] = resultado_ia.get("impostos", {})
-                dados["codigos_fiscais"] = resultado_ia.get("codigos_fiscais", {})
                 dados["extracao_ia"] = True
                 
                 # Extrai valores dos impostos
