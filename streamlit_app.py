@@ -84,6 +84,86 @@ with col3:
 st.markdown("---")
 
 # =============== SIDEBAR ===============
+
+# ==================== NOVO BLOCO: GESTÃO DE CHAVES DE API (streamlit_app.py) ====================
+
+# É altamente recomendado que você coloque a configuração na barra lateral
+with st.sidebar:
+    st.divider()
+    st.subheader("🤖 Provedor de Análise de IA")
+
+    # 1. Inicializar variáveis de estado (SÓ EXECUTA NA PRIMEIRA VEZ)
+    # Isso impede que o estado seja resetado a cada interação
+    if 'ia_provider' not in st.session_state:
+        st.session_state['ia_provider'] = 'hf'
+    if 'ia_api_key' not in st.session_state:
+        st.session_state['ia_api_key'] = None
+        
+    provider_options = ["Hugging Face (Padrão/Grátis)", "Google Gemini (Requer Chave)", "OpenAI ChatGPT (Requer Chave)"]
+    
+    # Define o índice de seleção baseado no estado atual
+    if st.session_state.get('ia_provider') == 'gemini':
+        default_index = 1
+    elif st.session_state.get('ia_provider') == 'chatgpt':
+        default_index = 2
+    else:
+        default_index = 0
+
+    ia_provider_display = st.selectbox(
+        "Escolha o motor de IA para Análises:",
+        provider_options,
+        index=default_index, # Mantém a seleção anterior
+        key="ia_provider_select"
+    )
+
+    # 2. Lógica de atualização e campos de token
+    
+    # Limpa a chave se o usuário voltar para Hugging Face
+    if ia_provider_display == "Hugging Face (Padrão/Grátis)":
+        st.session_state['ia_api_key'] = None
+        st.session_state['ia_provider'] = 'hf'
+
+    elif "Google Gemini" in ia_provider_display:
+        st.session_state['ia_provider'] = 'gemini'
+        
+        token = st.text_input(
+            "Insira sua Chave de API do Gemini:", 
+            type="password",
+            # RECUPERA O VALOR JÁ SALVO PARA EVITAR O RESET
+            value=st.session_state.get('ia_api_key', ''), 
+            key="gemini_api_key_input"
+        )
+        
+        if token:
+            st.session_state['ia_api_key'] = token
+        else:
+            st.session_state['ia_api_key'] = None
+
+
+    elif "OpenAI ChatGPT" in ia_provider_display:
+        st.session_state['ia_provider'] = 'chatgpt'
+        
+        token = st.text_input(
+            "Insira sua Chave de API do OpenAI (GPT):", 
+            type="password",
+            # RECUPERA O VALOR JÁ SALVO PARA EVITAR O RESET
+            value=st.session_state.get('ia_api_key', ''), 
+            key="openai_api_key_input"
+        )
+        
+        if token:
+            st.session_state['ia_api_key'] = token
+        else:
+            st.session_state['ia_api_key'] = None
+        
+    # Exibição do status atual
+    status_key_ok = st.session_state.get('ia_api_key') is not None and st.session_state['ia_api_key'] != ''
+    provider_name = st.session_state.get('ia_provider', 'hf')
+
+    st.caption(f"Status da IA: **{provider_name.upper()}** {'(🔑 Chave OK)' if status_key_ok else '(🔑 Chave Pendente)' if provider_name != 'hf' else ''}")
+
+# ==================== FIM DO NOVO BLOCO (streamlit_app.py) ====================
+
 with st.sidebar:
     st.header("⚙️ Configurações")
     
@@ -285,7 +365,7 @@ if uploaded_files:
                 provider = get_model_provider()
                 if st.button("Executar Análise de IA"):
                     analisar_contexto_ia(df_filtrado, provider)
-                    
+
                 # Estatísticas avançadas
                 st.divider()
                 st.subheader("📈 Análise")
