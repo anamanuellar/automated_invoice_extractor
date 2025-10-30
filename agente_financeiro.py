@@ -108,7 +108,7 @@ def analisar_contexto_ia(df, provider: str):
                 # 4. CHAMADA DE CONTEÚDO: Chama o modelo através do objeto client
                 # Esta é a sintaxe recomendada pelo SDK moderno
                 result = client.models.generate_content(
-                    model="gemini-1.5-flash",
+                    model="gemini-2.5-flash",
                     contents=prompt
                 )
 
