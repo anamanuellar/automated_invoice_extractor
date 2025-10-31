@@ -1,384 +1,205 @@
 """
-MÓDULO DE EXTRAÇÃO COM IA GENERATIVA
-=====================================
+Módulo: extrator_ia_itens_impostos
+----------------------------------
+Versão final compatível com:
+- Gemini (google-generativeai >= 0.7)
+- OpenAI (openai >= 1.0)
+- Hugging Face (gratuito)
 
-Usa Google Gemini para extrair:
-- Itens de produtos/serviços
-- Impostos (ICMS, IPI, PIS, COFINS)
-- Códigos fiscais (CFOP, NCM, CSOSN/O-CST)
-
-Mantém extração regex para dados simples (NF, série, data, CNPJ)
-Delega para IA apenas o complexo (itens e impostos)
-
-Autor: Sistema Financeiro IA
-Data: 2025
+Corrigido para não gerar warnings de Pylance.
 """
 
-from typing import Dict, List, Optional, Any, Tuple, Callable
+from typing import Dict, Any, Optional
 import json
 import re
-from datetime import datetime
+import streamlit as st
 
-# Type stubs para evitar erros de "possibly unbound"
-configure: Optional[Callable[..., None]] = None
-GenerativeModel: Optional[type] = None
-GEMINI_DISPONIVEL: bool = False
+# ===================== IMPORTS SEGUROS =====================
 
+# Evita "possibly unbound" usando variáveis padrão None
+genai = None
+OpenAI = None
+pipeline = None
+
+# Gemini
 try:
-    from google.generativeai.client import configure
-    from google.generativeai.generative_models import GenerativeModel
+    import google.generativeai as genai  # type: ignore
     GEMINI_DISPONIVEL = True
 except ImportError:
     GEMINI_DISPONIVEL = False
 
+# OpenAI
+try:
+    from openai import OpenAI  # type: ignore
+    OPENAI_DISPONIVEL = True
+except ImportError:
+    OPENAI_DISPONIVEL = False
+
+# Hugging Face
+try:
+    from transformers import pipeline  # type: ignore
+    HF_DISPONIVEL = True
+except ImportError:
+    HF_DISPONIVEL = False
+
+
+# ===================== CLASSE PRINCIPAL =====================
 
 class ExtractorIA:
-    """Extrator com IA Generativa para itens e impostos de NF"""
-    
-    def __init__(self, api_key: str):
-        """
-        Inicializa o extrator com Gemini
-        
-        Args:
-            api_key: Chave da API Google Gemini
-        """
-        try:
-            if not GEMINI_DISPONIVEL:
-                raise ImportError("google-generativeai não está instalado")
-            
-            if configure is None or GenerativeModel is None:
-                raise ImportError("google-generativeai não pôde ser importado")
-            
-            configure(api_key=api_key)  # type: ignore
-            self.model: Optional[Any] = GenerativeModel('gemini-pro')  # type: ignore
-            self.status: str = "CONECTADO ✅"
-        except Exception as e:
-            self.status = f"ERRO: {str(e)}"
-            self.model = None
-    
-    # ============ EXTRAÇÃO DE ITENS COM IA =============
-    
-    def extrair_itens_com_ia(self, texto_nf: str) -> List[Dict[str, Any]]:
-        """
-        Extrai itens (produtos/serviços) da NF usando IA
-        
-        Args:
-            texto_nf: Texto completo da nota fiscal
-            
-        Returns:
-            Lista com dicts contendo: codigo, descricao, ncm, cfop, 
-            quantidade, valor_unitario, valor_total, aliquota_icms, aliquota_ipi
-        """
-        if not self.model:
-            return []
-        
-        prompt = f"""
-Analise o seguinte texto de Nota Fiscal e extraia TODOS os itens (produtos ou serviços).
+    """
+    Responsável por usar diferentes modelos de IA
+    para extrair CFOP, NCM, CST e impostos de DANFEs.
+    """
 
-Para CADA item, extraia:
-1. Código do produto (se houver)
-2. Descrição completa
-3. NCM (8 dígitos, ex: 87039000)
-4. CFOP (4 dígitos, ex: 5100)
-5. Quantidade
-6. Valor unitário
-7. Valor total do item
-8. Alíquota ICMS (%)
-9. Alíquota IPI (%)
-10. CSOSN ou O-CST (se Simples Nacional ou Normal)
+    def __init__(self, provider: str = "huggingface", api_key: Optional[str] = None):
+        self.provider = provider.lower()
+        self.api_key = api_key
+        self.status = "INICIALIZANDO..."
+        self.model: Optional[Any] = None
+        self.client: Optional[Any] = None
+        self.pipe: Optional[Any] = None
 
-IMPORTANTE:
-- Se não encontrar NCM, tente inferir pela descrição
-- Se não encontrar CFOP, assume 5100 (venda)
-- Se não encontrar CSOSN/CST, deixe vazio
-- Alíquotas: coloque 0 se isento/não incidente
-- Mantenha o mesmo padrão de formatação
+        # ========== GEMINI ==========
+        if self.provider == "gemini" and GEMINI_DISPONIVEL and genai:
+            if not self.api_key:
+                raise ValueError("API Key do Gemini não fornecida.")
+            try:
+                if callable(getattr(genai, "configure", None)):
+                    getattr(genai, "configure", lambda **_: None)(api_key=self.api_key)  # type: ignore
+                self.model = getattr(genai, "GenerativeModel")("gemini-1.5-flash")
+                self.status = "CONECTADO (Gemini)"
+            except Exception as e:
+                self.status = f"❌ Erro ao conectar Gemini: {e}"
 
-TEXTO DA NOTA FISCAL:
-{texto_nf}
+        # ========== OPENAI ==========
+        elif self.provider == "openai" and OPENAI_DISPONIVEL and OpenAI:
+            if not self.api_key:
+                raise ValueError("API Key da OpenAI não fornecida.")
+            try:
+                self.client = OpenAI(api_key=self.api_key)
+                self.model = "gpt-4o-mini"  # nome do modelo
+                self.status = "CONECTADO (OpenAI GPT-4o-mini)"
+            except Exception as e:
+                self.status = f"❌ Erro ao conectar OpenAI: {e}"
 
-RESPONDA EM JSON PURO (sem markdown, sem ```):
-[
-  {{
-    "codigo": "string",
-    "descricao": "string",
-    "ncm": "string (8 dígitos)",
-    "cfop": "string (4 dígitos)",
-    "quantidade": number,
-    "valor_unitario": number,
-    "valor_total": number,
-    "aliquota_icms": number (0-100),
-    "aliquota_ipi": number (0-100),
-    "csosn_ou_cst": "string"
-  }}
-]
+        # ========== HUGGING FACE ==========
+        elif self.provider == "huggingface" and HF_DISPONIVEL and pipeline:
+            try:
+                self.pipe = pipeline("text2text-generation", model="google/flan-t5-base")
+                self.status = "CONECTADO (Hugging Face)"
+            except Exception as e:
+                self.status = f"❌ Erro ao conectar Hugging Face: {e}"
 
-Se não houver itens, retorne: []
-"""
-        
-        try:
-            response = self.model.generate_content(prompt)
-            response_text = response.text.strip()
-            
-            # Remove markdown code blocks se existirem
-            response_text = re.sub(r'^```json\n?', '', response_text)
-            response_text = re.sub(r'\n?```$', '', response_text)
-            
-            items = json.loads(response_text)
-            
-            # Validação e limpeza
-            items_limpos = []
-            for item in items:
-                item_limpo = self._validar_item(item)
-                if item_limpo:
-                    items_limpos.append(item_limpo)
-            
-            return items_limpos
-        
-        except Exception as e:
-            print(f"Erro ao extrair itens com IA: {e}")
-            return []
-    
-    def _validar_item(self, item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Valida e limpa dados do item"""
-        try:
-            # Garante tipos corretos
-            item_limpo = {
-                "codigo": str(item.get("codigo", "")).strip() or None,
-                "descricao": str(item.get("descricao", "")).strip(),
-                "ncm": str(item.get("ncm", "")).strip() or None,
-                "cfop": str(item.get("cfop", "5100")).strip(),  # Default 5100
-                "quantidade": float(item.get("quantidade", 1)),
-                "valor_unitario": float(item.get("valor_unitario", 0)),
-                "valor_total": float(item.get("valor_total", 0)),
-                "aliquota_icms": float(item.get("aliquota_icms", 0)),
-                "aliquota_ipi": float(item.get("aliquota_ipi", 0)),
-                "csosn_ou_cst": str(item.get("csosn_ou_cst", "")).strip() or None,
-            }
-            
-            # Validação mínima
-            if not item_limpo["descricao"] or item_limpo["valor_total"] <= 0:
-                return None
-            
-            return item_limpo
-        
-        except Exception:
-            return None
-    
-    # ============ EXTRAÇÃO DE IMPOSTOS COM IA =============
-    
-    def extrair_impostos_com_ia(self, texto_nf: str) -> Dict[str, Any]:
-        """
-        Extrai informações de impostos da NF usando IA
-        
-        Returns:
-            Dict com: valor_icms, valor_ipi, valor_pis, valor_cofins,
-            base_calculo_icms, base_calculo_pis_cofins, regime_tributario
-        """
-        if not self.model:
-            return {}
-        
-        prompt = f"""
-Analise a SEÇÃO DE CÁLCULO DE IMPOSTOS desta Nota Fiscal e extraia os valores:
+        else:
+            self.status = "❌ Nenhum modelo de IA disponível."
 
-VALORES A EXTRAIR:
-1. Valor Total de ICMS
-2. Valor Total de IPI
-3. Valor Total de PIS
-4. Valor Total de COFINS
-5. Base de Cálculo do ICMS
-6. Base de Cálculo de PIS/COFINS
-7. Regime tributário do emitente (Simples Nacional, Lucro Real, Lucro Presumido, Normal)
-8. Indicador de Presença de Substituição Tributária (ST)
-9. ICMS Substituto (se houver)
-10. ICMS Próprio
+    # ---------------------------------------------------------
 
-IMPORTANTE:
-- Se valor não aparecer, coloque 0
-- Regime: use exatamente um de: "simples", "lucro_real", "lucro_presumido", "normal"
-- ST (Substituição Tributária): true/false
-- Mantenha 2 casas decimais
+    def _formatar_prompt(self, texto: str) -> str:
+        """Cria o prompt padronizado para qualquer modelo"""
+        return (
+            "Extraia do texto da nota fiscal (DANFE) os seguintes campos:\n"
+            "CFOP, NCM, CST/CSOSN, ICMS, PIS e COFINS.\n\n"
+            "Retorne em JSON no formato:\n"
+            "{ 'cfop': '', 'ncm': '', 'cst': '', 'icms': '', 'pis': '', 'cofins': '' }\n\n"
+            f"Texto:\n{texto[:5000]}"
+        )
 
-TEXTO DA NOTA FISCAL:
-{texto_nf}
+    # ---------------------------------------------------------
 
-RESPONDA EM JSON PURO (sem markdown):
-{{
-  "valor_icms": number,
-  "valor_ipi": number,
-  "valor_pis": number,
-  "valor_cofins": number,
-  "base_calculo_icms": number,
-  "base_calculo_pis_cofins": number,
-  "regime_tributario": "string (simples|lucro_real|lucro_presumido|normal)",
-  "tem_substituicao_tributaria": boolean,
-  "valor_icms_st": number,
-  "valor_icms_proprio": number,
-  "observacoes": "string"
-}}
-"""
-        
-        try:
-            response = self.model.generate_content(prompt)
-            response_text = response.text.strip()
-            
-            # Remove markdown
-            response_text = re.sub(r'^```json\n?', '', response_text)
-            response_text = re.sub(r'\n?```$', '', response_text)
-            
-            impostos = json.loads(response_text)
-            
-            # Validação
-            impostos_limpos = {
-                "valor_icms": float(impostos.get("valor_icms", 0)),
-                "valor_ipi": float(impostos.get("valor_ipi", 0)),
-                "valor_pis": float(impostos.get("valor_pis", 0)),
-                "valor_cofins": float(impostos.get("valor_cofins", 0)),
-                "base_calculo_icms": float(impostos.get("base_calculo_icms", 0)),
-                "base_calculo_pis_cofins": float(impostos.get("base_calculo_pis_cofins", 0)),
-                "regime_tributario": str(impostos.get("regime_tributario", "normal")),
-                "tem_substituicao_tributaria": bool(impostos.get("tem_substituicao_tributaria", False)),
-                "valor_icms_st": float(impostos.get("valor_icms_st", 0)),
-                "valor_icms_proprio": float(impostos.get("valor_icms_proprio", 0)),
-                "observacoes": str(impostos.get("observacoes", "")),
-            }
-            
-            return impostos_limpos
-        
-        except Exception as e:
-            print(f"Erro ao extrair impostos com IA: {e}")
-            return {}
-    
-    # ============ EXTRAÇÃO DE CÓDIGOS FISCAIS COM IA =============
-    
-    def extrair_codigos_fiscais_com_ia(self, texto_nf: str) -> Dict[str, Any]:
-        """
-        Extrai todos os códigos fiscais relevantes com IA
-        
-        Returns:
-            Dict com: cfop_principal, ncm_items, csosn_simples, ocst_normal, regime
-        """
-        if not self.model:
-            return {}
-        
-        prompt = f"""
-Analise esta Nota Fiscal e extraia TODOS os códigos fiscais relevantes:
-
-1. CFOP (Código Fiscal de Operação):
-   - Principal (mais frequente): 4 dígitos
-   - Significado em português
-
-2. NCM (Nomenclatura Comum MERCOSUL):
-   - Para cada produto: 8 dígitos
-   - Descrição
-
-3. CSOSN (Simples Nacional):
-   - Se Simples: 3 dígitos
-   - Descrição
-
-4. O-CST (Regime Normal):
-   - Se Normal: 2 dígitos
-   - Descrição
-
-5. PIS/COFINS:
-   - Códigos de situação (CST PIS/COFINS)
-
-6. ICMS:
-   - Origem da Mercadoria (0-8)
-   - Tributação do ICMS (00-90)
-
-7. Regime Tributário do Emitente
-
-TEXTO DA NOTA FISCAL:
-{texto_nf}
-
-RESPONDA EM JSON PURO:
-{{
-  "cfop_principal": {{
-    "codigo": "string (4 dígitos)",
-    "descricao": "string",
-    "tipo": "string (Entrada|Saída|Transferência|Devolução)"
-  }},
-  "ncm_items": [
-    {{
-      "codigo": "string (8 dígitos)",
-      "descricao": "string"
-    }}
-  ],
-  "csosn_simples": {{
-    "codigo": "string (3 dígitos)",
-    "descricao": "string"
-  }},
-  "ocst_normal": {{
-    "codigo": "string (2 dígitos)",
-    "descricao": "string"
-  }},
-  "regime_tributario": "string (simples|lucro_real|lucro_presumido|normal)",
-  "origem_mercadoria": number (0-8),
-  "tributacao_icms": "string (00-90)",
-  "cst_pis": "string (01-08)",
-  "cst_cofins": "string (01-08)"
-}}
-"""
-        
-        try:
-            response = self.model.generate_content(prompt)
-            response_text = response.text.strip()
-            
-            # Remove markdown
-            response_text = re.sub(r'^```json\n?', '', response_text)
-            response_text = re.sub(r'\n?```$', '', response_text)
-            
-            codigos = json.loads(response_text)
-            return codigos
-        
-        except Exception as e:
-            print(f"Erro ao extrair códigos com IA: {e}")
-            return {}
-    
-    # ============ EXTRAÇÃO CONSOLIDADA =============
-    
     def extrair_nf_completa(self, texto_nf: str) -> Dict[str, Any]:
-        """
-        Extração consolidada: usa IA para itens e impostos
-        
-        Returns:
-            Dict com todos os dados da NF estruturados
-        """
-        resultado = {
-            "itens": self.extrair_itens_com_ia(texto_nf),
-            "impostos": self.extrair_impostos_com_ia(texto_nf),
-            "codigos_fiscais": self.extrair_codigos_fiscais_com_ia(texto_nf),
-            "timestamp": datetime.now().isoformat()
+        """Processa a DANFE usando o modelo configurado"""
+        if not texto_nf or not isinstance(texto_nf, str):
+            return {"erro": "Texto inválido ou vazio."}
+
+        prompt = self._formatar_prompt(texto_nf)
+        resposta: Optional[str] = None
+
+        try:
+            # GEMINI
+            if self.provider == "gemini" and self.model and GEMINI_DISPONIVEL:
+                result = self.model.generate_content(prompt)
+                resposta = getattr(result, "text", None)
+                if resposta:
+                    resposta = resposta.strip()
+
+            # OPENAI
+            elif self.provider == "openai" and self.client and OPENAI_DISPONIVEL:
+                completion = self.client.chat.completions.create(
+                    model=self.model or "gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": "Você é um analista fiscal especialista em DANFEs brasileiras."},
+                        {"role": "user", "content": prompt}
+                    ]
+                )
+                msg = completion.choices[0].message
+                resposta = getattr(msg, "content", None)
+                if resposta:
+                    resposta = resposta.strip()
+
+            # HUGGINGFACE
+            elif self.provider == "huggingface" and self.pipe and HF_DISPONIVEL:
+                result = self.pipe(prompt, max_new_tokens=250)
+                if isinstance(result, list) and result:
+                    resposta = result[0].get("generated_text", "").strip()
+
+        except Exception as e:
+            return {"erro": f"Falha na execução do modelo: {e}"}
+
+        if not resposta:
+            return {"erro": "Falha na resposta do modelo IA."}
+
+        # Tenta converter resposta em JSON
+        try:
+            json_start = resposta.find("{")
+            json_end = resposta.rfind("}") + 1
+            json_text = resposta[json_start:json_end]
+            parsed = json.loads(json_text)
+        except Exception:
+            parsed = {
+                "texto_bruto": resposta,
+                "cfop": self._match_first(r"\b\d{4}\b", resposta),
+                "ncm": self._match_first(r"\b\d{8}\b", resposta),
+                "cst": self._match_first(r"\b\d{3}\b", resposta),
+            }
+
+        return {
+            "itens": [],
+            "impostos": {
+                "cfop": parsed.get("cfop"),
+                "ncm": parsed.get("ncm"),
+                "cst": parsed.get("cst"),
+                "valor_icms": parsed.get("icms"),
+                "valor_pis": parsed.get("pis"),
+                "valor_cofins": parsed.get("cofins"),
+            },
+            "resposta_bruta": resposta,
         }
-        
-        return resultado
+
+    # ---------------------------------------------------------
+    def _match_first(self, pattern: str, text: str) -> Optional[str]:
+        """Utilitário simples para buscar primeira ocorrência regex"""
+        m = re.search(pattern, text or "")
+        return m.group(0) if m else None
 
 
-# ============ FUNÇÕES AUXILIARES =============
+# ===================== TESTE LOCAL OPCIONAL =====================
 
-def verificar_gemini_extractor(api_key: str) -> Tuple[bool, str]:
-    """Verifica se a chave Gemini funciona para extração"""
+if __name__ == "__main__":
+    st.title("🔍 Teste do ExtractorIA")
+
+    texto_exemplo = """
+    DANFE - Documento Auxiliar da Nota Fiscal Eletrônica
+    CFOP 5102, NCM 85044010, CST 060, ICMS 18%, PIS 1.65%, COFINS 7.6%
+    """
+
+    provedor = st.sidebar.selectbox("Selecione o provedor de IA", ["huggingface", "gemini", "openai"])
+    chave = st.sidebar.text_input("API Key (quando aplicável)", type="password")
+
     try:
-        if not GEMINI_DISPONIVEL:
-            return False, "google-generativeai não está instalado. Instale com: pip install google-generativeai"
-        
-        extractor: ExtractorIA = ExtractorIA(api_key)
-        if "ERRO" in extractor.status:
-            return False, extractor.status
-        return True, extractor.status
+        extrator = ExtractorIA(provider=provedor, api_key=chave)
+        st.info(f"Status: {extrator.status}")
+        resultado = extrator.extrair_nf_completa(texto_exemplo)
+        st.json(resultado)
     except Exception as e:
-        return False, f"Erro: {str(e)}"
-
-
-def testar_extractor_ia(api_key: str, texto_teste: str) -> Dict[str, Any]:
-    """Testa o extractor com um texto de exemplo"""
-    extractor = ExtractorIA(api_key)
-    
-    if "ERRO" in extractor.status:
-        return {"status": "ERRO", "mensagem": extractor.status}
-    
-    resultado = extractor.extrair_nf_completa(texto_teste)
-    resultado["status"] = "OK"
-    
-    return resultado
+        st.error(f"Erro ao iniciar: {e}")
