@@ -142,11 +142,12 @@ if uploaded_files:
     with st.spinner("Processando PDFs, aguarde..."):
         try:
             df = processar_pdfs(
-                pdf_paths,
-                _progress_callback=update_progress,
-                modelo_escolhido=modelo_escolhido,
-                api_key_ia=api_key_ia
-            )
+            pdf_paths,
+            _progress_callback=update_progress,
+            api_key=api_key_ia,
+            provider=modelo_escolhido
+        )
+
             progress_bar.progress(100)
 
             if not df.empty:

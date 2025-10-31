@@ -1,39 +1,55 @@
 """
-EXTRATOR HÍBRIDO UNIVERSAL
-===========================
-Combina:
-- Extração confiável via REGEX
-- Análise inteligente via IA (Gemini / OpenAI / Hugging Face)
-- Cache híbrido (memória + disco)
-- OCR e fallback automático
+EXTRATOR DE NOTAS FISCAIS (HÍBRIDO INTELIGENTE)
+================================================
+→ Extrai dados de DANFEs (PDF) via Regex + OCR + IA opcional.
+→ Suporta Gemini, OpenAI ou HuggingFace.
+→ Cache híbrido (memória + disco).
+→ Compatível com Streamlit.
 """
 
-from typing import Any, Optional, List, Dict, Union
-import os, io, re, json, traceback, hashlib, requests
+from typing import Any, Optional, List, Dict
+import os
+import io
+import re
+import json
+import traceback
+import hashlib
 from pathlib import Path
 from datetime import datetime
+
 import numpy as np
 import pandas as pd
 import pdfplumber
-import fitz
+import fitz  # PyMuPDF
 import streamlit as st
 
-# 🚀 Novo módulo universal de IA
-from extrator_ia_itens_impostos import enriquecer_dados_fiscais
+# ===================== IA OPCIONAL =====================
+ExtractorIA: Optional[Any] = None
+try:
+    from extrator_ia_itens_impostos import ExtractorIA, GEMINI_DISPONIVEL
+    IA_DISPONIVEL = True
+except ImportError:
+    IA_DISPONIVEL = False
+    GEMINI_DISPONIVEL = False
 
-# ==================== CACHE ====================
+# ===================== CACHE =====================
 CACHE_DIR = "cache_nf"
 os.makedirs(CACHE_DIR, exist_ok=True)
-CNPJ_CACHE: Dict[str, Optional[str]] = {}
+
 NF_MEM_CACHE: Dict[str, Dict[str, Any]] = {}
 
+
 def get_pdf_hash(pdf_path: str) -> str:
+    """Gera hash MD5 único para cache."""
     with open(pdf_path, "rb") as f:
         return hashlib.md5(f.read()).hexdigest()
 
+
 def carregar_cache_nf(hash_pdf: str) -> Optional[Dict[str, Any]]:
+    """Carrega resultado do cache (memória → disco)."""
     if hash_pdf in NF_MEM_CACHE:
         return NF_MEM_CACHE[hash_pdf]
+
     path = os.path.join(CACHE_DIR, f"{hash_pdf}.json")
     if os.path.exists(path):
         try:
@@ -45,156 +61,155 @@ def carregar_cache_nf(hash_pdf: str) -> Optional[Dict[str, Any]]:
             return None
     return None
 
+
 def salvar_cache_nf(hash_pdf: str, data: Dict[str, Any]) -> None:
+    """Salva resultado no cache."""
     NF_MEM_CACHE[hash_pdf] = data
     path = os.path.join(CACHE_DIR, f"{hash_pdf}.json")
     try:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"Erro ao salvar cache: {e}")
 
-# ==================== REGEX PATTERNS ====================
-RE_MOEDA = re.compile(r"R?\$?\s*(\d{1,3}(?:\.\d{3})*,\d{2})")
-RE_DATA = re.compile(r"\b\d{2}/\d{2}/\d{4}\b")
-RE_CNPJ = re.compile(r"\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}")
 
-# ==================== FUNÇÕES AUXILIARES ====================
+# ===================== FUNÇÕES AUXILIARES =====================
+
 def limpar_string(texto: Optional[Any]) -> str:
+    """Limpa e normaliza texto de qualquer tipo."""
     if texto is None:
         return ""
     if isinstance(texto, (list, dict)):
-        texto = json.dumps(texto, ensure_ascii=False)
-    texto = str(texto)
-    texto = re.sub(r'[\r\n\t]', ' ', texto.strip())
-    texto = re.sub(r'\s+', ' ', texto)
-    return texto.strip()
+        texto = " ".join(str(item) for item in texto) if isinstance(texto, list) else str(texto)
+    texto_str = str(texto).strip()
+    texto_str = re.sub(r'[\r\n\t]', ' ', texto_str)
+    texto_str = re.sub(r'\s+', ' ', texto_str)
+    return texto_str.strip()
+
 
 def normalizar_valor_moeda(valor: Optional[str]) -> float:
+    """Converte R$ 1.234,56 → 1234.56."""
     if not valor:
         return np.nan
-    valor = str(valor).replace("R$", "").replace("r$", "").strip()
-    valor = valor.replace('.', '').replace(',', '.')
+    valor_str = str(valor).replace("R$", "").replace("r$", "").replace('.', '').replace(',', '.').strip()
     try:
-        return float(valor)
+        return float(valor_str)
     except ValueError:
         return np.nan
 
-def normalizar_cnpj_cpf(doc: Optional[str]) -> Optional[str]:
-    if not doc:
-        return None
-    doc = re.sub(r'\D', '', str(doc))
-    return doc if len(doc) in [11, 14] else None
 
-def buscar_nome_empresa_cnpj(cnpj: str) -> Optional[str]:
-    """Consulta nome da empresa (cacheado)."""
-    if not cnpj or len(cnpj) != 14:
-        return None
-    if cnpj in CNPJ_CACHE:
-        return CNPJ_CACHE[cnpj]
-    nome = f"CNPJ {cnpj} - Nome Enriquecido"
-    CNPJ_CACHE[cnpj] = nome
-    return nome
+# ===================== OCR E EXTRAÇÃO DE TEXTO =====================
 
-# ==================== EXTRAÇÃO DE TEXTO ====================
-def extrair_texto_pdf(pdf_path: str) -> str:
-    """Tenta extrair texto do PDF com pdfplumber, depois PyMuPDF."""
-    texto = ""
+def extrair_texto_pdfplumber(pdf_path: str) -> str:
+    """Extrai texto com pdfplumber (preferencial)."""
     try:
         with pdfplumber.open(pdf_path) as pdf:
-            texto = "\n".join(page.extract_text() or "" for page in pdf.pages)
+            texto = ""
+            for page in pdf.pages:
+                texto += page.extract_text() or ""
+            return texto
     except Exception:
-        pass
+        return ""
 
+
+def extrair_texto_pymupdf(pdf_path: str) -> str:
+    """Extrai texto com PyMuPDF (fallback OCR)."""
+    try:
+        doc = fitz.open(pdf_path)
+        texto = ""
+        for page in doc:
+            page_text = page.get_text("text") or ""
+            texto += str(page_text)
+        doc.close()
+        return texto
+    except Exception:
+        return ""
+
+
+def extrair_texto_completo(pdf_path: str) -> str:
+    """Escolhe o melhor método de extração."""
+    texto = extrair_texto_pdfplumber(pdf_path)
     if not texto or len(texto.strip()) < 50:
-        try:
-            doc = fitz.open(pdf_path)
-            texto = "\n".join(page.get_text("text") for page in doc)
-            doc.close()
-        except Exception:
-            pass
+        texto = extrair_texto_pymupdf(pdf_path)
     return texto
 
-# ==================== EXTRAÇÃO DE CAMPOS SIMPLES ====================
-def extrair_dados_basicos(texto: str) -> Dict[str, Any]:
-    dados: Dict[str, Any] = {}
 
-    # Número da NF
-    nf_match = re.search(r'N[º°O]?\s*[:\-]?\s*(\d{3,6})', texto, re.I)
-    if nf_match:
-        dados["numero_nf"] = nf_match.group(1)
+# ===================== REGEX DE CAMPOS =====================
+RE_NUMERO = re.compile(r"N[°ºO]?\s*[:\-]?\s*(\d{1,6})")
+RE_SERIE = re.compile(r"S[ÉE]RIE\s*[:\-]?\s*(\d+)")
+RE_CNPJ = re.compile(r"\b\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}\b")
+RE_VALOR_TOTAL = re.compile(
+    r"(?:VALOR TOTAL DA NOTA|TOTAL DA NOTA|VALOR TOTAL NF|TOTAL DA NF)[^\d]*(\d{1,3}(?:\.\d{3})*,\d{2})",
+    re.IGNORECASE,
+)
+RE_DATA = re.compile(r"\b\d{2}/\d{2}/\d{4}\b")
 
-    # Série
-    serie_match = re.search(r'S[ÉE]RIE\s*[:\-]?\s*(\d+)', texto, re.I)
-    if serie_match:
-        dados["serie"] = serie_match.group(1)
 
-    # Data de emissão
-    data_match = RE_DATA.search(texto)
-    if data_match:
-        dados["data_emissao"] = data_match.group(0)
+# ===================== EXTRAÇÃO PRINCIPAL =====================
 
-    # Valor total
-    valor_match = re.search(r'(?:VALOR TOTAL DA NOTA|TOTAL DA NF)[^\d]*(\d{1,3}(?:\.\d{3})*,\d{2})', texto, re.I)
-    if valor_match:
-        dados["valor_total"] = valor_match.group(1)
-        dados["valor_total_num"] = normalizar_valor_moeda(valor_match.group(1))
-
-    # CNPJs
-    cnpjs = RE_CNPJ.findall(texto)
-    if cnpjs:
-        dados["emitente_doc"] = normalizar_cnpj_cpf(cnpjs[0])
-        if len(cnpjs) > 1:
-            dados["dest_doc"] = normalizar_cnpj_cpf(cnpjs[1])
-
-    return dados
-
-# ==================== EXTRAÇÃO COMPLETA (IA + REGEX) ====================
-def extrair_dados_nf(pdf_path: str,
-                     provider_ia: str = "huggingface",
-                     api_key_ia: Optional[str] = None,
-                     enriquecer_cnpj: bool = True) -> Dict[str, Any]:
-    """Extrai dados da NF e aplica enriquecimento IA."""
+def extrair_dados_nf(pdf_path: str, api_key: Optional[str] = None, provider: Optional[str] = None) -> Dict[str, Any]:
+    """Extrai dados da NF (Regex + IA opcional)."""
     hash_pdf = get_pdf_hash(pdf_path)
     cached = carregar_cache_nf(hash_pdf)
     if cached:
         cached["arquivo"] = Path(pdf_path).name
         return cached
 
-    texto = extrair_texto_pdf(pdf_path)
-    dados = {"arquivo": Path(pdf_path).name, "status": "FALHA", "texto_completo": limpar_string(texto)}
+    nome_arquivo = Path(pdf_path).name
+    dados: Dict[str, Any] = {"arquivo": nome_arquivo, "status": "FALHA NA EXTRAÇÃO"}
 
-    if not texto.strip():
+    texto = extrair_texto_completo(pdf_path)
+    dados["texto_completo"] = limpar_string(texto)
+    if not dados["texto_completo"]:
         salvar_cache_nf(hash_pdf, dados)
         return dados
 
-    dados.update(extrair_dados_basicos(texto))
+    # ===== Regex básica (segura) =====
+    m_numero = RE_NUMERO.search(texto)
+    m_serie = RE_SERIE.search(texto)
+    m_data = RE_DATA.search(texto)
+    m_valor = RE_VALOR_TOTAL.search(texto)
 
-    if enriquecer_cnpj:
-        if dados.get("emitente_doc"):
-            dados["emitente_nome"] = buscar_nome_empresa_cnpj(dados["emitente_doc"])
-        if dados.get("dest_doc"):
-            dados["dest_nome"] = buscar_nome_empresa_cnpj(dados["dest_doc"])
+    dados["numero_nf"] = m_numero.group(1) if m_numero else None
+    dados["serie"] = m_serie.group(1) if m_serie else None
+    dados["data_emissao"] = m_data.group(0) if m_data else None
 
-    dados["status"] = "SUCESSO"
+    if m_valor:
+        valor_str = m_valor.group(1)
+        dados["valor_total"] = valor_str
+        dados["valor_total_num"] = normalizar_valor_moeda(valor_str)
+    else:
+        dados["valor_total"] = None
+        dados["valor_total_num"] = np.nan
 
-    # 🔹 Análise IA universal
-    try:
-        dados = enriquecer_dados_fiscais(dados, provider=provider_ia, api_key=api_key_ia)
-        dados["extracao_ia"] = True
-    except Exception as e:
-        dados["extracao_ia"] = False
-        dados["erro_ia"] = str(e)
+    cnpjs = RE_CNPJ.findall(texto)
+    if cnpjs:
+        dados["emitente_doc"] = cnpjs[0]
+        if len(cnpjs) > 1:
+            dados["dest_doc"] = cnpjs[1]
+
+    # ===== IA Opcional =====
+    dados["extracao_ia"] = False
+    if IA_DISPONIVEL and api_key and ExtractorIA is not None:
+        try:
+            extrator = ExtractorIA(provider=provider, api_key=api_key)
+            resultado = extrator.extrair_nf_completa(dados["texto_completo"])
+            dados["impostos"] = resultado.get("impostos", {})
+            dados["itens"] = resultado.get("itens", [])
+            dados["extracao_ia"] = True
+        except Exception as e:
+            dados["erro_ia"] = str(e)
 
     salvar_cache_nf(hash_pdf, dados)
     return dados
 
-# ==================== MÚLTIPLOS PDFs ====================
+
+# ===================== PROCESSAMENTO EM LOTE =====================
+
 @st.cache_data(show_spinner=False, ttl=86400)
-def processar_pdfs(pdf_paths: List[str],
-                   _progress_callback: Optional[Any] = None,
-                   modelo_escolhido: str = "huggingface",
-                   api_key_ia: Optional[str] = None) -> pd.DataFrame:
+def processar_pdfs(pdf_paths: List[str], _progress_callback: Optional[Any] = None,
+                   api_key: Optional[str] = None, provider: Optional[str] = None) -> pd.DataFrame:
+    """Processa múltiplos PDFs e retorna DataFrame consolidado."""
     if not pdf_paths:
         return pd.DataFrame()
 
@@ -202,26 +217,54 @@ def processar_pdfs(pdf_paths: List[str],
     for i, pdf in enumerate(pdf_paths):
         nome = Path(pdf).name
         if _progress_callback:
-            _progress_callback(f"Processando {i+1}/{len(pdf_paths)}: {nome}")
+            _progress_callback(f"📄 Processando {i + 1}/{len(pdf_paths)}: {nome}")
+
         try:
-            dados = extrair_dados_nf(pdf, provider_ia=modelo_escolhido, api_key_ia=api_key_ia)
+            dados = extrair_dados_nf(pdf, api_key=api_key, provider=provider)
             resultados.append(dados)
             if _progress_callback:
-                _progress_callback(f"✅ {nome} extraído com sucesso ({'IA' if dados.get('extracao_ia') else 'Regex'})")
+                metodo = "IA" if dados.get("extracao_ia") else "Regex"
+                _progress_callback(f"✅ {nome} processado via {metodo}")
         except Exception as e:
-            resultados.append({"arquivo": nome, "status": "ERRO", "erro": str(e)})
+            resultados.append({"arquivo": nome, "erro": str(e)})
             if _progress_callback:
-                _progress_callback(f"❌ Erro em {nome}: {str(e)}")
+                _progress_callback(f"❌ Falha ao processar {nome}: {str(e)}")
+
     return pd.DataFrame(resultados)
 
-# ==================== EXPORTAÇÃO ====================
-def exportar_para_excel_com_itens(df_nfs: pd.DataFrame) -> bytes:
+
+# ===================== EXPORTAÇÃO =====================
+
+def exportar_para_excel_com_itens(df: pd.DataFrame) -> bytes:
+    """Exporta resultados para Excel (Notas + Itens)."""
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df_nfs.to_excel(writer, sheet_name="Notas Fiscais", index=False)
-        if "analise_ia" in df_nfs.columns:
-            cols = ["arquivo", "numero_nf", "emitente_nome", "valor_total_num", "analise_ia"]
-            resumo = df_nfs[[c for c in cols if c in df_nfs.columns]]
-            resumo.to_excel(writer, sheet_name="Análise IA", index=False)
+        df.to_excel(writer, sheet_name="Notas Fiscais", index=False)
+        itens = []
+        for _, row in df.iterrows():
+            if isinstance(row.get("itens"), list):
+                for it in row["itens"]:
+                    it["NF"] = row.get("numero_nf")
+                    it["Arquivo"] = row.get("arquivo")
+                    itens.append(it)
+        if itens:
+            pd.DataFrame(itens).to_excel(writer, sheet_name="Itens", index=False)
     output.seek(0)
     return output.getvalue()
+
+
+def gerar_relatorio_pdf(df: pd.DataFrame) -> None:
+    """Gera relatório simples em PDF."""
+    from fpdf import FPDF
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", "B", 14)
+    pdf.cell(0, 10, "Resumo da Análise Fiscal", ln=True, align="C")
+    pdf.ln(10)
+    pdf.set_font("Arial", size=10)
+    for _, row in df.iterrows():
+        for k, v in row.items():
+            pdf.cell(0, 8, f"{k}: {v}", ln=True)
+        pdf.ln(5)
+    pdf.output("resumo_analise.pdf")
+    st.success("📄 Relatório PDF gerado com sucesso!")
