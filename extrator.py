@@ -210,112 +210,232 @@ def consulta_cnpj_api(cnpj: str, cache: Dict[str, Optional[str]]) -> Optional[st
     salvar_cache_cnpj(cache)
     return nome_empresarial
 
+# ===================== EXTRAÇÃO DE CAMPOS VIA REGEX =====================
+
+def extrair_numero_nf(texto: str) -> Optional[str]:
+    """Extrai o número da nota fiscal."""
+    match = RE_NUMERO.search(texto)
+    if match:
+        return match.group(1).strip()
+    return None
+
+
+def extrair_serie(texto: str) -> Optional[str]:
+    """Extrai a série da nota fiscal."""
+    match = RE_SERIE.search(texto)
+    if match:
+        return match.group(1).strip()
+    return None
+
+
+def extrair_data_emissao(texto: str) -> Optional[str]:
+    """Extrai a data de emissão (DD/MM/AAAA)."""
+    match = RE_DATA.search(texto)
+    if match:
+        return match.group(0).strip()
+    return None
+
+
+def extrair_cnpj_emitente(texto: str) -> Optional[str]:
+    """Extrai o CNPJ do emitente (primeiro CNPJ encontrado)."""
+    matches = RE_CNPJ.findall(texto)
+    if matches:
+        return matches[0].strip()
+    return None
+
+
+def extrair_nome_emitente(texto: str, cnpj_emitente: Optional[str] = None) -> Optional[str]:
+    """Tenta identificar o nome do emitente com base no CNPJ e no contexto."""
+    if not cnpj_emitente:
+        return None
+
+    # Captura até 100 caracteres antes do CNPJ
+    idx = texto.find(cnpj_emitente)
+    if idx != -1:
+        trecho_antes = texto[max(0, idx - 120):idx]
+        linhas = trecho_antes.split("\n")
+        for linha in reversed(linhas):
+            linha = linha.strip()
+            if len(linha) > 5 and not any(x in linha.upper() for x in ["CNPJ", "ENDEREÇO", "INSCRIÇÃO", "NOTA"]):
+                return linha
+    return None
+
+
+def extrair_cnpj_destinatario(texto: str) -> Optional[str]:
+    """Extrai o CNPJ do destinatário (segundo CNPJ encontrado)."""
+    matches = RE_CNPJ.findall(texto)
+    if len(matches) > 1:
+        return matches[1].strip()
+    return None
+
+
+def extrair_nome_destinatario(texto: str) -> Optional[str]:
+    """Tenta identificar o nome do destinatário com base em palavras-chave."""
+    linhas = texto.split("\n")
+    for i, linha in enumerate(linhas):
+        if "DESTINAT" in linha.upper():
+            for j in range(i + 1, min(i + 5, len(linhas))):
+                nome_candidato = linhas[j].strip()
+                if len(nome_candidato) > 5 and not any(x in nome_candidato.upper() for x in ["CNPJ", "ENDEREÇO", "INSCRIÇÃO"]):
+                    return nome_candidato
+    return None
+
+
+def extrair_valor_total(texto: str) -> Optional[str]:
+    """Extrai o valor total da NF a partir das palavras-chave."""
+    match = RE_VALOR_TOTAL.search(texto)
+    if match:
+        return match.group(1).strip()
+    return None
 
 
 # ===================== EXTRAÇÃO PRINCIPAL =====================
 
-def extrair_dados_nf(pdf_path: str, api_key: Optional[str] = None, provider: Optional[str] = None) -> Dict[str, Any]:
-    """Extrai dados da NF (Regex + IA opcional)."""
+def extrair_dados_nf(
+    pdf_path: str,
+    enriquecer_cnpj: bool = True,         # ✅ adiciona suporte ao enriquecimento via API
+    api_key_gemini: Optional[str] = None  # ✅ adiciona suporte a IA (Gemini/OpenAI)
+) -> Dict[str, Any]:
+    """
+    Extrai dados de uma NF-e em PDF.
+    
+    Combina extração tradicional via regex e, opcionalmente, IA para campos avançados.
+    """
+
     hash_pdf = get_pdf_hash(pdf_path)
-    cached = carregar_cache_nf(hash_pdf)
-    if cached:
-        cached["arquivo"] = Path(pdf_path).name
-        return cached
+    cached_data = carregar_cache_nf(hash_pdf)
+
+    if cached_data:
+        cached_data["arquivo"] = Path(pdf_path).name
+        return cached_data
 
     nome_arquivo = Path(pdf_path).name
     dados: Dict[str, Any] = {"arquivo": nome_arquivo, "status": "FALHA NA EXTRAÇÃO"}
 
-    texto = extrair_texto_completo(pdf_path)
-    dados["texto_completo"] = limpar_string(texto)
+    # 1️⃣ Extração do texto (OCR + pdfplumber)
+    texto_completo = extrair_texto_completo(pdf_path)
+    dados["texto_completo"] = limpar_string(texto_completo)
+
     if not dados["texto_completo"]:
         salvar_cache_nf(hash_pdf, dados)
         return dados
 
-    # ===== Regex básica (segura) =====
-    m_numero = RE_NUMERO.search(texto)
-    m_serie = RE_SERIE.search(texto)
-    m_data = RE_DATA.search(texto)
-    m_valor = RE_VALOR_TOTAL.search(texto)
+    # 2️⃣ Extração tradicional (regex confiável)
+    dados["numero_nf"] = extrair_numero_nf(dados["texto_completo"])
+    dados["serie"] = extrair_serie(dados["texto_completo"])
+    dados["data_emissao"] = extrair_data_emissao(dados["texto_completo"])
+    dados["emitente_doc"] = extrair_cnpj_emitente(dados["texto_completo"])
+    dados["emitente_nome"] = extrair_nome_emitente(dados["texto_completo"], dados["emitente_doc"])
+    dados["dest_doc"] = extrair_cnpj_destinatario(dados["texto_completo"])
+    dados["dest_nome"] = extrair_nome_destinatario(dados["texto_completo"])
 
-    dados["numero_nf"] = m_numero.group(1) if m_numero else None
-    dados["serie"] = m_serie.group(1) if m_serie else None
-    dados["data_emissao"] = m_data.group(0) if m_data else None
+    valor_total_str = extrair_valor_total(dados["texto_completo"])
+    dados["valor_total"] = valor_total_str
+    dados["valor_total_num"] = normalizar_valor_moeda(valor_total_str) if valor_total_str else np.nan
 
-    if m_valor:
-        valor_str = m_valor.group(1)
-        dados["valor_total"] = valor_str
-        dados["valor_total_num"] = normalizar_valor_moeda(valor_str)
-    else:
-        dados["valor_total"] = None
-        dados["valor_total_num"] = np.nan
+    # 3️⃣ Enriquecimento de CNPJ (opcional)
+    if enriquecer_cnpj:
+        cache_cnpj = carregar_cache_cnpj()
 
-    cnpjs = RE_CNPJ.findall(texto)
-    if cnpjs:
-        dados["emitente_doc"] = cnpjs[0]
-        if len(cnpjs) > 1:
-            dados["dest_doc"] = cnpjs[1]
+        emitente_doc = dados.get("emitente_doc")
+        dest_doc = dados.get("dest_doc")
 
-    # === Enriquecimento automático de nomes ===
-    cache_cnpj = carregar_cache_cnpj()
+        if isinstance(emitente_doc, str) and emitente_doc.strip():
+            nome_emit = consulta_cnpj_api(emitente_doc, cache_cnpj)
+            if nome_emit:
+                dados["emitente_nome"] = nome_emit
 
-    emitente_doc = dados.get("emitente_doc")
-    dest_doc = dados.get("dest_doc")
+        if isinstance(dest_doc, str) and dest_doc.strip():
+            nome_dest = consulta_cnpj_api(dest_doc, cache_cnpj)
+            if nome_dest:
+                dados["dest_nome"] = nome_dest
 
-    if emitente_doc:
-        nome_emitente = consulta_cnpj_api(emitente_doc, cache_cnpj)
-        if nome_emitente:
-            dados["emitente_nome"] = nome_emitente
-
-    if dest_doc:
-        nome_dest = consulta_cnpj_api(dest_doc, cache_cnpj)
-        if nome_dest:
-            dados["dest_nome"] = nome_dest
-
-
-
-    # ===== IA Opcional =====
+    # 4️⃣ IA opcional para itens e impostos (se houver API configurada)
     dados["extracao_ia"] = False
-    if IA_DISPONIVEL and api_key and ExtractorIA is not None:
+    if api_key_gemini:
         try:
-            extrator = ExtractorIA(provider=provider, api_key=api_key)
-            resultado = extrator.extrair_nf_completa(dados["texto_completo"])
-            dados["impostos"] = resultado.get("impostos", {})
-            dados["itens"] = resultado.get("itens", [])
-            dados["extracao_ia"] = True
+            from extrator_ia_itens_impostos import ExtractorIA, GEMINI_DISPONIVEL
+
+            if GEMINI_DISPONIVEL:
+                extractor_ia = ExtractorIA(api_key_gemini)
+                resultado_ia = extractor_ia.extrair_nf_completa(dados["texto_completo"])
+
+                dados["itens"] = resultado_ia.get("itens", [])
+                dados["impostos"] = resultado_ia.get("impostos", {})
+                dados["extracao_ia"] = True
+
         except Exception as e:
             dados["erro_ia"] = str(e)
+            dados["extracao_ia"] = False
 
+    # 5️⃣ Finaliza e salva no cache
+    dados["status"] = "SUCESSO"
     salvar_cache_nf(hash_pdf, dados)
     return dados
 
 
-# ===================== PROCESSAMENTO EM LOTE =====================
+# ==================== PROCESSAMENTO DE MÚLTIPLOS PDFS ====================
 
 @st.cache_data(show_spinner=False, ttl=86400)
-def processar_pdfs(pdf_paths: List[str], _progress_callback: Optional[Any] = None,
-                   api_key: Optional[str] = None, provider: Optional[str] = None) -> pd.DataFrame:
-    """Processa múltiplos PDFs e retorna DataFrame consolidado."""
+def processar_pdfs(
+    pdf_paths: List[str],
+    _progress_callback: Optional[Any] = None,
+    api_key_gemini: Optional[str] = None  # ✅ Adicionado
+) -> pd.DataFrame:
+    """
+    Processa uma lista de caminhos de PDFs e retorna um DataFrame com os resultados.
+
+    Args:
+        pdf_paths: lista de arquivos PDF das notas fiscais
+        _progress_callback: função opcional para reportar progresso (ex: st.info)
+        api_key_gemini: chave da API Gemini (ou outro modelo de IA) para análise avançada opcional
+    """
     if not pdf_paths:
         return pd.DataFrame()
 
-    resultados = []
-    for i, pdf in enumerate(pdf_paths):
-        nome = Path(pdf).name
+    notas_fiscais_extraidas: List[Dict[str, Any]] = []
+
+    for i, pdf_path in enumerate(pdf_paths):
+        nome_arquivo = Path(pdf_path).name
+
         if _progress_callback:
-            _progress_callback(f"📄 Processando {i + 1}/{len(pdf_paths)}: {nome}")
+            total_files = len(pdf_paths)
+            message = f"Processando arquivo {i+1} de {total_files}: {nome_arquivo}"
+            _progress_callback(message)
 
         try:
-            dados = extrair_dados_nf(pdf, api_key=api_key, provider=provider)
-            resultados.append(dados)
-            if _progress_callback:
-                metodo = "IA" if dados.get("extracao_ia") else "Regex"
-                _progress_callback(f"✅ {nome} processado via {metodo}")
-        except Exception as e:
-            resultados.append({"arquivo": nome, "erro": str(e)})
-            if _progress_callback:
-                _progress_callback(f"❌ Falha ao processar {nome}: {str(e)}")
+            # ✅ Repassa a chave da IA para o extrator principal
+            dados_nf = extrair_dados_nf(
+                pdf_path,
+                enriquecer_cnpj=True,
+                api_key_gemini=api_key_gemini
+            )
 
-    return pd.DataFrame(resultados)
+            notas_fiscais_extraidas.append(dados_nf)
+
+            if _progress_callback:
+                metodo = "IA+REGEX" if dados_nf.get("extracao_ia") else "REGEX"
+                _progress_callback(f"✅ Extração concluída ({metodo}): {nome_arquivo}")
+
+        except Exception as e:
+            dados_falha = {
+                "arquivo": nome_arquivo,
+                "status": "ERRO INTERNO",
+                "detalhe_erro": str(e),
+                "traceback": traceback.format_exc(),
+            }
+            notas_fiscais_extraidas.append(dados_falha)
+
+            if _progress_callback:
+                _progress_callback(f"❌ Falha crítica em {nome_arquivo}: {str(e)}")
+
+    # ✅ Retorna DataFrame com todos os resultados
+    if notas_fiscais_extraidas:
+        df_resultados = pd.DataFrame(notas_fiscais_extraidas)
+        return df_resultados
+    else:
+        return pd.DataFrame()
+
 
 
 # ===================== EXPORTAÇÃO =====================
