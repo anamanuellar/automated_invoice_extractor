@@ -84,13 +84,8 @@ RE_NUMERO = re.compile(
 RE_SERIE = re.compile(r"S[ÉE]RIE\s*[:\-]?\s*(\d+)")
 RE_CNPJ = re.compile(r"\b\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}\b")
 RE_VALOR_TOTAL = re.compile(
-    r"(?:V\.?[\s\.]?TOTAL[\s\.]?(?:DA[\s\.]?NOTA|NF|PRODUTOS|GERAL)?|"
-    r"VALOR[\s\.]?TOTAL[\s\.]?(?:DA[\s\.]?NOTA|NF|PRODUTOS|GERAL)?|"
-    r"TOTAL[\s\.]?DA[\s\.]?(?:NOTA|NF)|"
-    r"VALOR[\s\.]?DA[\s\.]?(?:NOTA|NF))"
-    r"\s*R?\$?\s*"
-    r"(\d{1,3}(?:\.\d{3})*,\d{2})",
-    re.IGNORECASE | re.MULTILINE
+    r"(?:VALOR\s*(?:TOTAL(?:\s*DA\s*NOTA)?|DA\s*NF|NF)?|V\.?\s*TOTAL)[^\d]{0,10}(\d{1,3}(?:\.\d{3})*,\d{2})",
+    re.IGNORECASE
 )
 RE_DATA = re.compile(r"\b\d{2}/\d{2}/\d{4}\b")
 RE_MOEDA = re.compile(r"R?\$?\s*(\d{1,3}(?:\.\d{3})*,\d{2})")
