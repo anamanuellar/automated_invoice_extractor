@@ -1,6 +1,7 @@
 """
 Análise Executiva - Fiscal + Financeira com DETALHAMENTO DE IMPACTO CFOP
 - Regime do destinatário (seleção do usuário)
+- Nome do destinatário (extraído dinamicamente)
 - Extração automática de regime por CNPJ
 - DETALHE: Impacto financeiro se CFOP estiver incorreto
 """
@@ -165,21 +166,34 @@ NF {nf_info['numero_nf']} - {nf_info['emitente']}
     
     return relatorio
 
-def gerar_analise_completa(df: pd.DataFrame, regime_destinatario: str) -> str:
-    """Gera análise fiscal + financeira com detalhamento de impacto CFOP"""
+def gerar_analise_completa(df: pd.DataFrame, regime_destinatario: str, ie_status: str = "IE Ativa") -> str:
+    """Gera análise fiscal + financeira com detalhamento de impacto CFOP
+    
+    Args:
+        df: DataFrame com dados das notas fiscais
+        regime_destinatario: Regime tributário (Simples Nacional, Lucro Real, Lucro Presumido, IE Ativa, IE Isenta)
+        ie_status: Situação da IE (IE Isenta ou IE Ativa)
+    """
     
     df = enriquecer_regimes_emitentes(df)
-    destinatario_ie_isenta = "isent" in regime_destinatario.lower()
+    destinatario_ie_isenta = "isent" in ie_status.lower()
     
     metricas = calcular_metricas_financeiras(df)
     por_fornecedor = analisar_por_fornecedor(df)
+    
+    # ✅ EXTRAIR NOME DO DESTINATÁRIO DINAMICAMENTE
+    nome_destinatario = "EMPRESA"
+    if "dest_nome" in df.columns and len(df) > 0:
+        dest_nome = df["dest_nome"].iloc[0]
+        if pd.notna(dest_nome) and str(dest_nome).strip():
+            nome_destinatario = str(dest_nome).upper()
     
     relatorio = f"""
 ════════════════════════════════════════════════════════════════════════════════
               📊 ANÁLISE EXECUTIVA - FISCAL + FINANCEIRA                        
                                          
 
-📌 DESTINATÁRIO: HOTEIS DESIGN S.A.
+📌 DESTINATÁRIO: {nome_destinatario}
 Regime: {regime_destinatario}
 {'✅ IE ISENTA - Operações devem ser isentas (CFOP 5.949)' if destinatario_ie_isenta else '✅ IE ATIVA - Pode aproveitar créditos de ICMS'}
 

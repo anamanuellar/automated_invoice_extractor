@@ -179,7 +179,7 @@ with st.sidebar:
     usar_ia = st.toggle("Ativar Análise com IA", value=True)
     api_key_ia = st.text_input("🔐 Chave de API (Gemini ou OpenAI)", type="password")
     
-    if st.button("🧹 Limpar Cache/Memória", width='stretch'):
+    if st.button("🧹 Limpar Cache/Memória", use_container_width=True):
         limpar_cache()
         st.success("✅ Cache e memória limpos!")
         st.rerun()
@@ -222,7 +222,7 @@ if uploaded_files:
         st.markdown("### 📋 Dados extraídos")
         colunas_visiveis = ["arquivo", "numero_nf", "serie", "data_emissao", "emitente_nome", "dest_nome", "valor_total", "status"]
         df_view = df_result_ia[[c for c in colunas_visiveis if c in df_result_ia.columns]]
-        st.dataframe(df_view, width='stretch', height=450)
+        st.dataframe(df_view, use_container_width=True, height=450)
 
         # ========================= EXPORTAÇÕES =========================
         st.divider()
@@ -236,7 +236,7 @@ if uploaded_files:
                 data=exportar_para_excel_com_itens(df_result_ia),
                 file_name=f"notas_fiscais_{datetime.now():%Y%m%d_%H%M%S}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                width='stretch',
+                use_container_width=True,
             )
         
         with col2:
@@ -245,7 +245,7 @@ if uploaded_files:
                 data=df_result_ia.to_csv(index=False).encode("utf-8"),
                 file_name=f"notas_fiscais_{datetime.now():%Y%m%d_%H%M%S}.csv",
                 mime="text/csv",
-                width='stretch',
+                use_container_width=True,
             )
 
         # ========================= GRÁFICOS =========================
@@ -264,7 +264,7 @@ if uploaded_files:
             
             fig1 = px.bar(top_emit, x="Emitente", y="Valor", color_discrete_sequence=["#1f77b4"])
             fig1.update_layout(height=400, showlegend=False)
-            st.plotly_chart(fig1, width='stretch')
+            st.plotly_chart(fig1, use_container_width=True)
         
         st.markdown('</div>', unsafe_allow_html=True)
 
@@ -280,7 +280,7 @@ if uploaded_files:
             
             fig2 = px.line(trend, x="Período", y="Valor", markers=True, color_discrete_sequence=["#2ca02c"])
             fig2.update_layout(height=400, showlegend=False)
-            st.plotly_chart(fig2, width='stretch')
+            st.plotly_chart(fig2, use_container_width=True)
         
         st.markdown('</div>', unsafe_allow_html=True)
 
@@ -294,7 +294,7 @@ if uploaded_files:
             
             fig3 = px.pie(dist, values="Valor", names="Fornecedor")
             fig3.update_layout(height=450)
-            st.plotly_chart(fig3, width='stretch')
+            st.plotly_chart(fig3, use_container_width=True)
         
         st.markdown('</div>', unsafe_allow_html=True)
 
@@ -308,7 +308,7 @@ if uploaded_files:
             
             fig4 = px.bar(qty, x="Quantidade", y="Emitente", orientation="h", color_discrete_sequence=["#ff7f0e"])
             fig4.update_layout(height=400, showlegend=False)
-            st.plotly_chart(fig4, width='stretch')
+            st.plotly_chart(fig4, use_container_width=True)
         
         st.markdown('</div>', unsafe_allow_html=True)
 
@@ -316,17 +316,53 @@ if uploaded_files:
         st.divider()
         st.subheader("📊 Análise Fiscal + Financeira")
         
-        regime = st.selectbox("Regime tributário:", ["Simples Nacional", "Lucro Real", "Lucro Presumido", "Isento de IE"])
+        # Seleção do regime tributário
+        regime = st.selectbox(
+            "Regime tributário da empresa:",
+            ["Simples Nacional", "Lucro Real", "Lucro Presumido", "IE Ativa", "IE Isenta"],
+            help="Selecione o regime tributário da sua empresa (destinatária)"
+        )
         
-        if st.button("Gerar Análise Fiscal 📈", width='stretch'):
+        # Seleção de IE (Isenta ou Ativa)
+        st.markdown("**Qual é a situação da sua Inscrição Estadual (IE)?**")
+        
+        ie_status = st.radio(
+            "Selecione:",
+            ["IE Isenta", "IE Ativa"],
+            horizontal=True,
+            help="IE Isenta: Não precisa pagar ICMS. IE Ativa: Pode aproveitar créditos de ICMS"
+        )
+        
+        # Explicação do impacto
+        if "isent" in ie_status.lower():
+            st.info("""
+            🎯 **IE ISENTA - CFOPs Corretos:**
+            - **5.949**: Compra com IE isenta (operação isenta) - ✅ CORRETO
+            - **5.102**: Compra tributada - ❌ INCORRETO
+            
+            Se usar CFOP 5.102, você será tributado e não poderá recuperar ICMS.
+            """)
+        else:
+            st.info("""
+            🎯 **IE ATIVA - CFOPs Corretos:**
+            - **5.102**: Compra tributada (normal) - ✅ CORRETO
+            - **5.101**: Compra com ST (Substituição Tributária)
+            - **5.949**: Compra isenta
+            
+            Com IE ativa, você pode aproveitar créditos de ICMS nas operações tributadas.
+            """)
+        
+        if st.button("Gerar Análise Fiscal 📈", use_container_width=True):
             if ANALISE_DISPONIVEL and gerar_analise_financeira_completa is not None:
-                with st.spinner("⏳ Gerando análise..."):
-                    analise = gerar_analise_financeira_completa(df_result_ia, regime)
-                    st.markdown("### 📊 Resultado:")
+                with st.spinner("⏳ Gerando análise personalizada..."):
+                    # Passar regime e status de IE
+                    analise = gerar_analise_financeira_completa(df_result_ia, regime, ie_status)
+                    st.markdown("### 📊 Resultado da Análise:")
                     st.text(analise)
                     
                     st.session_state['analise'] = analise
                     st.session_state['regime'] = regime
+                    st.session_state['ie_status'] = ie_status
             else:
                 st.warning("Módulo de análise não disponível")
 
@@ -335,7 +371,7 @@ if uploaded_files:
         st.subheader("📄 Exportar Relatório em PDF")
         
         if 'analise' in st.session_state and PDF_DISPONIVEL:
-            if st.button("🔴 Gerar PDF", width='stretch'):
+            if st.button("🔴 Gerar PDF", use_container_width=True):
                 with st.spinner("⏳ Gerando PDF com múltiplas páginas..."):
                     pdf_data = gerar_pdf_completo(df_result_ia, st.session_state['regime'], st.session_state['analise'])
                     if pdf_data:
@@ -344,7 +380,7 @@ if uploaded_files:
                             data=pdf_data,
                             file_name=f"analise_fiscal_{datetime.now():%Y%m%d_%H%M%S}.pdf",
                             mime="application/pdf",
-                            width='stretch',
+                            use_container_width=True,
                         )
                         st.success("✅ PDF gerado com sucesso!")
         elif 'analise' not in st.session_state:
