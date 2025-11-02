@@ -1,34 +1,73 @@
-# Core Data Processing
+# Extrator de Notas Fiscais - Requisitos v2.3
+# 
+# Instale com: pip install -r requirements.txt
+# 
+# Última atualização: 02/11/2025
+
+# ==================== CORE ====================
 pandas>=2.0.0
 numpy>=1.24.0
 
-# PDF Processing
-pdfplumber>=0.10.0
+# ==================== PDF & EXTRAÇÃO ====================
 PyPDF2>=3.0.0
+pdfplumber>=0.10.0
+pytesseract>=0.3.10
+reportlab>=4.0.0
 pdf2image>=1.16.0
 pytesseract>=0.3.10
 PyMuPDF>=1.22.0
 
-# Image Processing
+
+# ==================== IMAGE PROCESSING ==================== 
 Pillow>=10.0.0
 easyocr>=1.7.0
 
-# Excel
+# ==================== EXCEL ==================== 
 openpyxl>=3.1.0
 
-# Web Requests
-requests>=2.31.0
-
-# Streamlit & Visualization
-streamlit>=1.28.0
-plotly>=5.0.0
+# ==================== GRÁFICOS & VISUALIZAÇÃO ====================
+plotly>=5.17.0
 matplotlib>=3.7.0
+seaborn>=0.12.0
+streamlit>=1.28.0
 
-# Machine Learning & NLP
-scikit-learn>=1.3.0
-transformers>=4.30.0
-torch>=2.0.0
-
-# IA
+# ==================== API & WEB ====================
+requests>=2.31.0
 openai
 google-generativeai>=0.3.0
+
+# ==================== MACHINE LEARNING & NLP ====================
+transformers>=4.30.0
+torch>=2.0.0
+scikit-learn>=1.3.0
+
+# ==================== UTILITÁRIOS ====================
+python-dateutil>=2.8.2
+pytz>=2023.3
+openpyxl>=3.1.0
+
+# ==================== DESENVOLVIMENTO ====================
+# Descomente se estiver em desenvolvimento
+# black>=23.0.0
+# pylint>=2.17.0
+# pytest>=7.0.0
+
+# ==================== NOTAS ====================
+# 
+# Dependências principais:
+#   - streamlit: Framework web
+#   - pandas: Manipulação de dados
+#   - PyPDF2: Leitura de PDFs
+#   - plotly: Gráficos interativos
+#   - reportlab: Geração de PDFs
+#   - google-generativeai: API Gemini
+#   - openai: API OpenAI
+#
+# Para OCR (opcional, requer Tesseract):
+#   - Instalar Tesseract: https://github.com/UB-Mannheim/tesseract/wiki
+#   - Adicionar ao PATH do Windows ou instalar via apt (Linux/Mac)
+#
+# Para GPU (opcional):
+#   - pip install torch-cu118 (CUDA 11.8)
+#   - pip install torch-cu121 (CUDA 12.1)
+#
