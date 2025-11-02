@@ -90,21 +90,25 @@ def limpar_string(texto: Optional[Any]) -> str:
 
 def normalizar_valor_moeda(valor: Optional[str]) -> float:
     """
-    CORRIGIDO: Converte R$ 1.234,56 → 1234.56.
-    A correção garante que o ponto de milhar seja removido antes da vírgula decimal ser trocada por ponto.
+    Converte string de moeda brasileira para float.
+    Padrão: 1.234.567,89 → 1234567.89
     """
     if not valor:
         return np.nan
-    valor_str = str(valor).replace("R$", "").replace("r$", "").strip()
-    # Remove ponto de milhar, mas mantém a vírgula decimal
-    valor_str = re.sub(r'\.(?=\d{3},)', '', valor_str)
+    
+    valor_str = str(valor).strip()
+    valor_str = valor_str.replace("R$", "").replace("r$", "").strip()
+    
+    # Remove TODOS os pontos (milhar)
+    valor_str = valor_str.replace(".", "")
+    
     # Troca vírgula decimal por ponto
-    valor_str = valor_str.replace(',', '.')
+    valor_str = valor_str.replace(",", ".")
+    
     try:
         return float(valor_str)
-    except ValueError:
+    except (ValueError, TypeError):
         return np.nan
-
 
 # ===================== OCR E EXTRAÇÃO DE TEXTO =====================
 
