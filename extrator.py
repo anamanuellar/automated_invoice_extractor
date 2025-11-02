@@ -384,7 +384,6 @@ def extrair_valor_total(texto: str) -> Optional[str]:
     
     return None
     
-    return None
 
 
 def extrair_dados_nf(
