@@ -213,18 +213,32 @@ def consulta_cnpj_api(cnpj: str, cache: Dict[str, Optional[str]]) -> Optional[st
 # ===================== EXTRAÇÃO DE CAMPOS VIA REGEX =====================
 
 def extrair_numero_nf(texto: str) -> Optional[str]:
-    """Extrai o número da nota fiscal."""
-    match = RE_NUMERO.search(texto)
-    if match:
-        return match.group(1).strip()
+    """Extrai número da NF com base em padrões comuns."""
+    # busca por formatos mais variados
+    padroes = [
+        r"NOTA\s+FISCAL[^\d]*(\d{4,10})",
+        r"\bN[º°O]?\s*[:\-]?\s*(\d{3,10})\b",
+        r"\bNF[^\d]*(\d{4,10})"
+    ]
+    for p in padroes:
+        m = re.search(p, texto, re.IGNORECASE)
+        if m:
+            return m.group(1).strip().lstrip("0")
     return None
 
-
 def extrair_serie(texto: str) -> Optional[str]:
-    """Extrai a série da nota fiscal."""
-    match = RE_SERIE.search(texto)
-    if match:
-        return match.group(1).strip()
+    """Extrai a série da NF com fallback baseado em posição."""
+    m = re.search(r"S[ÉE]RIE\s*[:\-]?\s*(\d{1,4})", texto, re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+
+    # fallback — busca próximo do número da NF
+    linhas = texto.split("\n")
+    for i, l in enumerate(linhas):
+        if "SÉRIE" in l.upper() and i + 1 < len(linhas):
+            prox = re.findall(r"\d{1,4}", linhas[i + 1])
+            if prox:
+                return prox[0]
     return None
 
 
@@ -282,10 +296,20 @@ def extrair_nome_destinatario(texto: str) -> Optional[str]:
 
 
 def extrair_valor_total(texto: str) -> Optional[str]:
-    """Extrai o valor total da NF a partir das palavras-chave."""
-    match = RE_VALOR_TOTAL.search(texto)
-    if match:
-        return match.group(1).strip()
+    """Extrai valor total com mais robustez."""
+    padroes = [
+        r"VALOR\s+TOTAL\s+(?:DA\s+NOTA|NF|GERAL)?[^\d]*(\d{1,3}(?:\.\d{3})*,\d{2})",
+        r"TOTAL\s+DA\s+NOTA[^\d]*(\d{1,3}(?:\.\d{3})*,\d{2})",
+        r"VALOR\s+DA\s+NOTA[^\d]*(\d{1,3}(?:\.\d{3})*,\d{2})",
+    ]
+    for p in padroes:
+        m = re.search(p, texto, re.IGNORECASE)
+        if m:
+            return m.group(1)
+    # fallback — última ocorrência de valor monetário
+    matches = re.findall(r"\d{1,3}(?:\.\d{3})*,\d{2}", texto)
+    if matches:
+        return matches[-1]
     return None
 
 
@@ -376,7 +400,6 @@ def extrair_dados_nf(
 
 # ==================== PROCESSAMENTO DE MÚLTIPLOS PDFS ====================
 
-@st.cache_data(show_spinner=False, ttl=86400)
 def processar_pdfs(
     pdf_paths: List[str],
     _progress_callback: Optional[Any] = None,

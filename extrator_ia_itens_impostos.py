@@ -1,205 +1,175 @@
 """
-Módulo: extrator_ia_itens_impostos
-----------------------------------
-Versão final compatível com:
-- Gemini (google-generativeai >= 0.7)
-- OpenAI (openai >= 1.0)
-- Hugging Face (gratuito)
-
-Corrigido para não gerar warnings de Pylance.
+Módulo de IA para extração e análise fiscal inteligente
+-------------------------------------------------------
+Suporte: Gemini | OpenAI | Hugging Face
 """
 
-from typing import Dict, Any, Optional
+from typing import Optional, Dict, Any
 import json
-import re
-import streamlit as st
 
-# ===================== IMPORTS SEGUROS =====================
+# =====================================================
+# IMPORTS SEGUROS — Inicializados com None
+# =====================================================
 
-# Evita "possibly unbound" usando variáveis padrão None
-genai = None
-OpenAI = None
-pipeline = None
-
-# Gemini
 try:
-    import google.generativeai as genai  # type: ignore
+    import google.genai as genai
     GEMINI_DISPONIVEL = True
 except ImportError:
+    genai = None
     GEMINI_DISPONIVEL = False
 
-# OpenAI
 try:
-    from openai import OpenAI  # type: ignore
+    from openai import OpenAI
     OPENAI_DISPONIVEL = True
 except ImportError:
+    OpenAI = None
     OPENAI_DISPONIVEL = False
 
-# Hugging Face
 try:
-    from transformers import pipeline  # type: ignore
+    from transformers import pipeline as hf_pipeline
     HF_DISPONIVEL = True
 except ImportError:
+    hf_pipeline = None
     HF_DISPONIVEL = False
 
 
-# ===================== CLASSE PRINCIPAL =====================
-
 class ExtractorIA:
-    """
-    Responsável por usar diferentes modelos de IA
-    para extrair CFOP, NCM, CST e impostos de DANFEs.
-    """
+    """Classe unificada para extração e análise de DANFEs via IA."""
 
-    def __init__(self, provider: str = "huggingface", api_key: Optional[str] = None):
-        self.provider = provider.lower()
+    def __init__(self, api_key: str, modelo_escolhido: str = "gemini") -> None:
+        """
+        Inicializa o extrator de IA com base no modelo escolhido.
+        Opções válidas: gemini | openai | huggingface
+        """
         self.api_key = api_key
-        self.status = "INICIALIZANDO..."
-        self.model: Optional[Any] = None
-        self.client: Optional[Any] = None
-        self.pipe: Optional[Any] = None
+        self.modelo_escolhido = modelo_escolhido.lower().strip()
+        self.status: str = "❌ Modelo não inicializado"
 
-        # ========== GEMINI ==========
-        if self.provider == "gemini" and GEMINI_DISPONIVEL and genai:
-            if not self.api_key:
-                raise ValueError("API Key do Gemini não fornecida.")
-            try:
-                if callable(getattr(genai, "configure", None)):
-                    getattr(genai, "configure", lambda **_: None)(api_key=self.api_key)  # type: ignore
-                self.model = getattr(genai, "GenerativeModel")("gemini-1.5-flash")
-                self.status = "CONECTADO (Gemini)"
-            except Exception as e:
-                self.status = f"❌ Erro ao conectar Gemini: {e}"
+        # Gemini
+        self.client = None
+        self.model = None
 
-        # ========== OPENAI ==========
-        elif self.provider == "openai" and OPENAI_DISPONIVEL and OpenAI:
-            if not self.api_key:
-                raise ValueError("API Key da OpenAI não fornecida.")
+        if self.modelo_escolhido == "gemini" and GEMINI_DISPONIVEL and genai:
             try:
-                self.client = OpenAI(api_key=self.api_key)
-                self.model = "gpt-4o-mini"  # nome do modelo
-                self.status = "CONECTADO (OpenAI GPT-4o-mini)"
+                self.client = genai.Client(api_key=self.api_key)
+                self.status = "✅ Gemini conectado"
             except Exception as e:
-                self.status = f"❌ Erro ao conectar OpenAI: {e}"
+                self.status = f"⚠️ Falha ao conectar Gemini: {e}"
 
-        # ========== HUGGING FACE ==========
-        elif self.provider == "huggingface" and HF_DISPONIVEL and pipeline:
+        # OpenAI
+        elif self.modelo_escolhido == "openai" and OPENAI_DISPONIVEL and OpenAI:
             try:
-                self.pipe = pipeline("text2text-generation", model="google/flan-t5-base")
-                self.status = "CONECTADO (Hugging Face)"
+                self.model = OpenAI(api_key=self.api_key)
+                self.status = "✅ OpenAI conectado"
             except Exception as e:
-                self.status = f"❌ Erro ao conectar Hugging Face: {e}"
+                self.status = f"⚠️ Falha ao conectar OpenAI: {e}"
+
+        # Hugging Face
+        elif self.modelo_escolhido == "huggingface" and HF_DISPONIVEL and hf_pipeline:
+            try:
+                self.model = hf_pipeline("summarization", model="facebook/bart-large-cnn")
+                self.status = "✅ Hugging Face conectado"
+            except Exception as e:
+                self.status = f"⚠️ Falha ao conectar Hugging Face: {e}"
 
         else:
-            self.status = "❌ Nenhum modelo de IA disponível."
+            self.status = "⚠️ Nenhum modelo de IA disponível"
 
-    # ---------------------------------------------------------
+def extrair_nf_completa(self, texto: str) -> Dict[str, Any]:
+    if not texto:
+        return {"erro": "Texto vazio"}
 
-    def _formatar_prompt(self, texto: str) -> str:
-        """Cria o prompt padronizado para qualquer modelo"""
-        return (
-            "Extraia do texto da nota fiscal (DANFE) os seguintes campos:\n"
-            "CFOP, NCM, CST/CSOSN, ICMS, PIS e COFINS.\n\n"
-            "Retorne em JSON no formato:\n"
-            "{ 'cfop': '', 'ncm': '', 'cst': '', 'icms': '', 'pis': '', 'cofins': '' }\n\n"
-            f"Texto:\n{texto[:5000]}"
-        )
-
-    # ---------------------------------------------------------
-
-    def extrair_nf_completa(self, texto_nf: str) -> Dict[str, Any]:
-        """Processa a DANFE usando o modelo configurado"""
-        if not texto_nf or not isinstance(texto_nf, str):
-            return {"erro": "Texto inválido ou vazio."}
-
-        prompt = self._formatar_prompt(texto_nf)
-        resposta: Optional[str] = None
-
-        try:
-            # GEMINI
-            if self.provider == "gemini" and self.model and GEMINI_DISPONIVEL:
-                result = self.model.generate_content(prompt)
-                resposta = getattr(result, "text", None)
-                if resposta:
-                    resposta = resposta.strip()
-
-            # OPENAI
-            elif self.provider == "openai" and self.client and OPENAI_DISPONIVEL:
-                completion = self.client.chat.completions.create(
-                    model=self.model or "gpt-4o-mini",
-                    messages=[
-                        {"role": "system", "content": "Você é um analista fiscal especialista em DANFEs brasileiras."},
-                        {"role": "user", "content": prompt}
-                    ]
-                )
-                msg = completion.choices[0].message
-                resposta = getattr(msg, "content", None)
-                if resposta:
-                    resposta = resposta.strip()
-
-            # HUGGINGFACE
-            elif self.provider == "huggingface" and self.pipe and HF_DISPONIVEL:
-                result = self.pipe(prompt, max_new_tokens=250)
-                if isinstance(result, list) and result:
-                    resposta = result[0].get("generated_text", "").strip()
-
-        except Exception as e:
-            return {"erro": f"Falha na execução do modelo: {e}"}
-
-        if not resposta:
-            return {"erro": "Falha na resposta do modelo IA."}
-
-        # Tenta converter resposta em JSON
-        try:
-            json_start = resposta.find("{")
-            json_end = resposta.rfind("}") + 1
-            json_text = resposta[json_start:json_end]
-            parsed = json.loads(json_text)
-        except Exception:
-            parsed = {
-                "texto_bruto": resposta,
-                "cfop": self._match_first(r"\b\d{4}\b", resposta),
-                "ncm": self._match_first(r"\b\d{8}\b", resposta),
-                "cst": self._match_first(r"\b\d{3}\b", resposta),
-            }
-
-        return {
-            "itens": [],
-            "impostos": {
-                "cfop": parsed.get("cfop"),
-                "ncm": parsed.get("ncm"),
-                "cst": parsed.get("cst"),
-                "valor_icms": parsed.get("icms"),
-                "valor_pis": parsed.get("pis"),
-                "valor_cofins": parsed.get("cofins"),
-            },
-            "resposta_bruta": resposta,
-        }
-
-    # ---------------------------------------------------------
-    def _match_first(self, pattern: str, text: str) -> Optional[str]:
-        """Utilitário simples para buscar primeira ocorrência regex"""
-        m = re.search(pattern, text or "")
-        return m.group(0) if m else None
-
-
-# ===================== TESTE LOCAL OPCIONAL =====================
-
-if __name__ == "__main__":
-    st.title("🔍 Teste do ExtractorIA")
-
-    texto_exemplo = """
-    DANFE - Documento Auxiliar da Nota Fiscal Eletrônica
-    CFOP 5102, NCM 85044010, CST 060, ICMS 18%, PIS 1.65%, COFINS 7.6%
-    """
-
-    provedor = st.sidebar.selectbox("Selecione o provedor de IA", ["huggingface", "gemini", "openai"])
-    chave = st.sidebar.text_input("API Key (quando aplicável)", type="password")
+    prompt = (
+        "Analise a DANFE a seguir e extraia os dados abaixo em formato JSON:\n"
+        "- Itens (descrição, quantidade, valor unitário, valor total)\n"
+        "- Impostos (ICMS, IPI, PIS, COFINS, regime tributário)\n"
+        "- Se um campo não estiver presente, use null.\n\n"
+        f"DANFE:\n{texto}"
+    )
 
     try:
-        extrator = ExtractorIA(provider=provedor, api_key=chave)
-        st.info(f"Status: {extrator.status}")
-        resultado = extrator.extrair_nf_completa(texto_exemplo)
-        st.json(resultado)
+        # Gemini (Google GenAI)
+        if self.modelo_escolhido == "gemini" and GEMINI_DISPONIVEL and self.client:
+            resposta = self.client.chat.completions.create(
+                model="gemini-2.5-chat-bison",
+                messages=[
+                    {"role": "system", "content": "Você é um especialista em DANFE e impostos."},
+                    {"role": "user", "content": prompt},
+                ],
+            )
+            texto_gerado = (
+                resposta.choices[0].message.content if (resposta and resposta.choices) else ""
+            )
+            return {"resposta": texto_gerado.strip() if texto_gerado else ""}
+
+        # OpenAI
+        elif self.modelo_escolhido == "openai" and OPENAI_DISPONIVEL and self.model:
+            chat = self.model.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "Você é um especialista em DANFE e impostos."},
+                    {"role": "user", "content": prompt},
+                ],
+            )
+            texto_gerado = chat.choices[0].message.content
+            return {"resposta": texto_gerado.strip() if texto_gerado else ""}
+
+        # Hugging Face
+        elif self.modelo_escolhido == "huggingface" and HF_DISPONIVEL and self.model:
+            output = self.model(
+                texto[:4000], max_length=500, min_length=100, do_sample=False
+            )
+            resumo = output[0].get("summary_text", "") if (output and isinstance(output, list)) else ""
+            return {"resposta": resumo.strip() if resumo else ""}
+
+        else:
+            return {"erro": "Modelo IA inválido ou não configurado"}
+
     except Exception as e:
-        st.error(f"Erro ao iniciar: {e}")
+        return {"erro": str(e)}
+
+
+def analisar_texto(self, texto: str) -> str:
+    if not texto:
+        return "❌ Nenhum texto fornecido."
+
+    try:
+        # Gemini
+        if self.modelo_escolhido == "gemini" and GEMINI_DISPONIVEL and self.client:
+            resposta = self.client.chat.completions.create(
+                model="gemini-2.5-chat-bison",
+                messages=[
+                    {"role": "system", "content": "Você é um analista tributário sênior."},
+                    {"role": "user", "content": f"Analise este texto e destaque tendências e anomalias:\n\n{texto}"},
+                ],
+            )
+            texto_gerado = (
+                resposta.choices[0].message.content if (resposta and resposta.choices) else ""
+            )
+            return texto_gerado.strip() if texto_gerado else ""
+
+        # OpenAI
+        elif self.modelo_escolhido == "openai" and OPENAI_DISPONIVEL and self.model:
+            chat = self.model.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "Você é um analista tributário sênior."},
+                    {"role": "user", "content": f"Analise este texto e destaque tendências e anomalias:\n\n{texto}"},
+                ],
+            )
+            texto_gerado = chat.choices[0].message.content
+            return texto_gerado.strip() if texto_gerado else ""
+
+        # Hugging Face
+        elif self.modelo_escolhido == "huggingface" and HF_DISPONIVEL and self.model:
+            resumo = self.model(texto[:4000], max_length=200, min_length=50, do_sample=False)
+            if isinstance(resumo, list) and resumo and "summary_text" in resumo[0]:
+                texto_gerado = resumo[0]["summary_text"]
+                return texto_gerado.strip() if texto_gerado else ""
+            return str(resumo)
+
+        else:
+            return "⚠️ Modelo de IA não configurado corretamente."
+
+    except Exception as e:
+        return f"❌ Erro ao processar análise de IA: {e}"
