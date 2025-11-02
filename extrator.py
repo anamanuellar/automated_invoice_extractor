@@ -143,12 +143,20 @@ def extrair_texto_completo(pdf_path: str) -> str:
 
 
 # ===================== REGEX DE CAMPOS =====================
-RE_NUMERO = re.compile(r"N[°ºO]?\s*[:\-]?\s*(\d{1,6})")
+RE_NUMERO = re.compile(
+    r"N[°ºO]?[:\.]?\s*(?:000\.)?(\d{3}(?:\.\d{3})*(?:\.\d{3})?)",
+    re.IGNORECASE
+)
 RE_SERIE = re.compile(r"S[ÉE]RIE\s*[:\-]?\s*(\d+)")
 RE_CNPJ = re.compile(r"\b\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}\b")
 RE_VALOR_TOTAL = re.compile(
-    r"(?:VALOR\s+TOTAL\s+(?:DA\s+NOTA|NF)|TOTAL\s+DA\s+NOTA|V\.\s+TOTAL\s+PRODUTOS)[^\d]*(\d{1,3}(?:\.\d{3})*,\d{2})",
-    re.IGNORECASE | re.MULTILINE,
+    r"(?:V\.?[\s\.]?TOTAL[\s\.]?(?:DA[\s\.]?NOTA|NF|PRODUTOS|GERAL)?|"
+    r"VALOR[\s\.]?TOTAL[\s\.]?(?:DA[\s\.]?NOTA|NF|PRODUTOS|GERAL)?|"
+    r"TOTAL[\s\.]?DA[\s\.]?(?:NOTA|NF)|"
+    r"VALOR[\s\.]?DA[\s\.]?(?:NOTA|NF))"
+    r"\s*R?\$?\s*"
+    r"(\d{1,3}(?:\.\d{3})*,\d{2})",
+    re.IGNORECASE | re.MULTILINE
 )
 RE_DATA = re.compile(r"\b\d{2}/\d{2}/\d{4}\b")
 
@@ -221,15 +229,37 @@ def consulta_cnpj_api(cnpj: str, cache: Dict[str, Optional[str]]) -> Optional[st
 # ===================== EXTRAÇÃO DE CAMPOS VIA REGEX =====================
 
 def extrair_numero_nf(texto: str) -> Optional[str]:
-    # Primeiro tenta o padrão com formatação
+    """
+    Extrai número da NF com melhor precisão.
+    
+    Padrões esperados:
+    - Nº.: 000.000.008
+    - NF: 00008
+    - Número NF: 8
+    """
+    
+    if not texto:
+        return None
+    
+    # Estratégia 1: Procura por padrão formatado "Nº.: XXX.XXX.XXX"
     padroes = [
-        r"N[°ºO]?[:\.]?\s*(\d{3}\.\d{3}\.\d{3})",  # 000.000.008
-        r"N[°ºO]?[:\.]?\s*(\d{4,10})",              # fallback
+        # Padrão DANFE: "Nº.: 000.000.008" com espaços flexíveis
+        r"N[°ºO]?\.?\s*[:\.]?\s*(\d{3}\.\d{3}\.\d{3})",
+        # Padrão com pontos: 000.000.008 ou 000.016.944
+        r"N[°ºO]?[:\.\s]*(\d{3}\.\d{3}\.\d{3})",
+        # Número simples 4-6 dígitos entre separadores
+        r"N[°ºO]?[:\.]?\s*(\d{6})(?:\s|$|,)",
+        # Fallback final
+        r"N[°ºO]?[:\.]?\s*(\d{3,6})(?:\s|$|\.)",
     ]
-    for p in padroes:
-        m = re.search(p, texto, re.IGNORECASE)
-        if m:
-            return m.group(1).strip()
+    
+    for padrao in padroes:
+        matches = re.finditer(padrao, texto, re.IGNORECASE | re.MULTILINE)
+        for m in matches:
+            numero = m.group(1).strip() if m.lastindex else m.group(0)
+            if numero:
+                return numero
+    
     return None
 
 def extrair_serie(texto: str) -> Optional[str]:
@@ -302,20 +332,35 @@ def extrair_nome_destinatario(texto: str) -> Optional[str]:
 
 
 def extrair_valor_total(texto: str) -> Optional[str]:
-    """Extrai valor total com mais robustez."""
-    padroes = [
-        r"VALOR\s+TOTAL\s+(?:DA\s+NOTA|NF|GERAL)?[^\d]*(\d{1,3}(?:\.\d{3})*,\d{2})",
-        r"TOTAL\s+DA\s+NOTA[^\d]*(\d{1,3}(?:\.\d{3})*,\d{2})",
-        r"VALOR\s+DA\s+NOTA[^\d]*(\d{1,3}(?:\.\d{3})*,\d{2})",
-    ]
-    for p in padroes:
-        m = re.search(p, texto, re.IGNORECASE)
-        if m:
-            return m.group(1)
-    # fallback — última ocorrência de valor monetário
-    matches = re.findall(r"\d{1,3}(?:\.\d{3})*,\d{2}", texto)
-    if matches:
-        return matches[-1]
+    """
+    Extrai valor total com melhor robustez.
+    Busca pelos padrões mais comuns em DANFEs.
+    """
+    
+    if not texto:
+        return None
+    
+    # Tenta match principal
+    match = RE_VALOR_TOTAL.search(texto)
+    if match:
+        valor = match.group(1).strip()
+        if valor:
+            return valor
+    
+    # Fallback 1: Procura por linha contendo "VALOR TOTAL" + número
+    linhas = texto.split("\n")
+    for linha in linhas:
+        if "VALOR TOTAL" in linha.upper() or "TOTAL DA NOTA" in linha.upper():
+            # Extrai primeiro valor monetário da linha
+            valores = re.findall(r"(\d{1,3}(?:\.\d{3})*,\d{2})", linha)
+            if valores:
+                return valores[-1]  # Pega o último (mais provavelmente o total)
+    
+    # Fallback 2: Se nenhum padrão casou, pega último valor monetário do documento
+    valores = re.findall(r"(\d{1,3}(?:\.\d{3})*,\d{2})", texto)
+    if valores:
+        return valores[-1]
+    
     return None
 
 
