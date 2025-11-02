@@ -361,28 +361,25 @@ def extrair_nome_destinatario(texto: str) -> Optional[str]:
     return None
 
 def extrair_valor_total(texto: str) -> Optional[str]:
-    """Extrai VALOR TOTAL DA NOTA procurando o PRIMEIRO valor nas próximas linhas"""
+    """Extrai o ÚLTIMO valor monetário após 'VALOR TOTAL DA NOTA'"""
     
-    if not texto:
+    if not texto or "VALOR TOTAL DA NOTA" not in texto:
         return None
     
-    linhas = texto.split("\n")
+    # Encontra a posição de "VALOR TOTAL DA NOTA"
+    pos = texto.find("VALOR TOTAL DA NOTA")
     
-    # Procura pela linha "VALOR TOTAL DA NOTA" e pega o PRIMEIRO valor nas próximas linhas
-    for i, ln in enumerate(linhas):
-        up = ln.upper()
-        if "VALOR TOTAL DA NOTA" in up:
-            # Tenta nas próximas 3 linhas (pega PRIMEIRO valor, não último)
-            v = pick_first_money_on_same_or_next_lines(linhas, i + 1, 3)
-            if v:
-                return v
-        # Fallback: busca também por "V. TOTAL PRODUTOS"
-        if "V. TOTAL" in up and "PRODUTOS" in up:
-            v = pick_first_money_on_same_or_next_lines(linhas, i + 1, 2)
-            if v:
-                return v
+    # Pega tudo após essa posição até "TRANSPORTADOR"
+    trecho = texto[pos:texto.find("TRANSPORTADOR", pos)]
     
-    return None
+    # Encontra TODOS os valores monetários
+    RE_MOEDA = re.compile(r"(\d{1,3}(?:\.\d{3})*,\d{2})")
+    valores = RE_MOEDA.findall(trecho)
+    
+    # Filtra zeros e retorna o ÚLTIMO valor significativo
+    valores = [v for v in valores if v != "0,00"]
+    
+    return valores[-1] if valores else None
     
 
 
