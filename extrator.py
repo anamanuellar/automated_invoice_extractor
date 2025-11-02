@@ -147,8 +147,8 @@ RE_NUMERO = re.compile(r"N[°ºO]?\s*[:\-]?\s*(\d{1,6})")
 RE_SERIE = re.compile(r"S[ÉE]RIE\s*[:\-]?\s*(\d+)")
 RE_CNPJ = re.compile(r"\b\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}\b")
 RE_VALOR_TOTAL = re.compile(
-    r"(?:VALOR TOTAL DA NOTA|TOTAL DA NOTA|VALOR TOTAL NF|TOTAL DA NF)[^\d]*(\d{1,3}(?:\.\d{3})*,\d{2})",
-    re.IGNORECASE,
+    r"(?:VALOR\s+TOTAL\s+(?:DA\s+NOTA|NF)|TOTAL\s+DA\s+NOTA|V\.\s+TOTAL\s+PRODUTOS)[^\d]*(\d{1,3}(?:\.\d{3})*,\d{2})",
+    re.IGNORECASE | re.MULTILINE,
 )
 RE_DATA = re.compile(r"\b\d{2}/\d{2}/\d{4}\b")
 
@@ -221,17 +221,15 @@ def consulta_cnpj_api(cnpj: str, cache: Dict[str, Optional[str]]) -> Optional[st
 # ===================== EXTRAÇÃO DE CAMPOS VIA REGEX =====================
 
 def extrair_numero_nf(texto: str) -> Optional[str]:
-    """Extrai número da NF com base em padrões comuns."""
-    # busca por formatos mais variados
+    # Primeiro tenta o padrão com formatação
     padroes = [
-        r"NOTA\s+FISCAL[^\d]*(\d{4,10})",
-        r"\bN[º°O]?\s*[:\-]?\s*(\d{3,10})\b",
-        r"\bNF[^\d]*(\d{4,10})"
+        r"N[°ºO]?[:\.]?\s*(\d{3}\.\d{3}\.\d{3})",  # 000.000.008
+        r"N[°ºO]?[:\.]?\s*(\d{4,10})",              # fallback
     ]
     for p in padroes:
         m = re.search(p, texto, re.IGNORECASE)
         if m:
-            return m.group(1).strip().lstrip("0")
+            return m.group(1).strip()
     return None
 
 def extrair_serie(texto: str) -> Optional[str]:
