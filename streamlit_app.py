@@ -174,10 +174,47 @@ st.divider()
 with st.sidebar:
     st.header("⚙️ Configurações")
     
+    st.markdown("### 🤖 IA e APIs")
+    
+    # Seleção de modelo IA
+    modelo_ia = st.radio(
+        "Escolha o modelo de IA:",
+        ["Gemini (Recomendado)", "OpenAI", "HuggingFace"],
+        help="Gemini é gratuito e rápido. OpenAI requer crédito."
+    )
+    
+    # Mapear seleção para modelo
+    modelo_map = {
+        "Gemini (Recomendado)": "gemini",
+        "OpenAI": "openai",
+        "HuggingFace": "huggingface"
+    }
+    
+    # Input de API key
+    st.markdown("#### 🔐 Chave de API")
+    api_key_ia = st.text_input(
+        "Cole sua chave de API aqui",
+        type="password",
+        help="Cole a chave de API de Gemini ou OpenAI. Não será salva."
+    )
+    
+    if api_key_ia:
+        st.success("✅ API key detectada!")
+    else:
+        st.warning("""
+        ⚠️ Nenhuma API key configurada.
+        
+        **Como obter:**
+        - **Gemini**: https://makersuite.google.com/app/apikey
+        - **OpenAI**: https://platform.openai.com/api-keys
+        """)
+    
+    st.markdown("---")
+    st.markdown("### 📊 Processamento")
+    
     enriquecer_cnpj = st.toggle("Enriquecer dados via CNPJ", value=True)
     enriquecer_fiscal = st.toggle("Enriquecer com Análise Fiscal", value=True)
     usar_ia = st.toggle("Ativar Análise com IA", value=True)
-    api_key_ia = st.text_input("🔐 Chave de API (Gemini ou OpenAI)", type="password")
     
     if st.button("🧹 Limpar Cache/Memória", use_container_width=True):
         limpar_cache()
@@ -385,16 +422,13 @@ if uploaded_files:
                 # Importar o ExtractorIA
                 from extrator_ia_itens_impostos import ExtractorIA
                 
-                # Tentar obter API key do session state ou variáveis de ambiente
-                api_key_ia = st.session_state.get('api_key_ia', '')
+                # API key já foi capturada na sidebar na variável 'api_key_ia'
+                # Se estiver vazia, tenta variáveis de ambiente
+                chave_api = api_key_ia if api_key_ia else os.getenv('GOOGLE_API_KEY', '')
                 
-                if not api_key_ia:
-                    # Tentar ler de variáveis de ambiente
-                    api_key_ia = os.getenv('GOOGLE_API_KEY', '')
-                
-                if api_key_ia:
+                if chave_api:
                     with st.spinner("⏳ Processando com IA..."):
-                        model = ExtractorIA(api_key_ia)
+                        model = ExtractorIA(chave_api)
                         
                         # Preparar dados para análise
                         dados_resumo = f"""
@@ -431,11 +465,20 @@ Por favor, forneça uma análise executiva focando em:
                         st.session_state['analise_ia'] = resultado
                 else:
                     st.warning("""
-                    ⚠️ Chave de API não configurada.
+                    ⚠️ **Chave de API não configurada!**
                     
-                    Para usar a análise com IA, configure sua API key:
-                    1. Defina a variável de ambiente `GOOGLE_API_KEY`
-                    2. Ou insira na barra lateral em Configurações
+                    Para usar a análise com IA:
+                    
+                    1️⃣ **Obter a chave:**
+                       - Gemini: https://makersuite.google.com/app/apikey
+                       - OpenAI: https://platform.openai.com/api-keys
+                    
+                    2️⃣ **Configurar na barra lateral:**
+                       - Cole a chave no campo "🔐 Chave de API"
+                    
+                    3️⃣ **Clique em "Executar análise completa com IA 🚀"**
+                    
+                    ℹ️ A chave não será salva e é usada apenas nesta sessão.
                     """)
             except ImportError:
                 st.warning("Módulo ExtractorIA não disponível. Verifique a instalação.")
