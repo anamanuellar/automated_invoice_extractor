@@ -38,6 +38,8 @@ Além da extração, o projeto oferece uma análise fiscal e financeira sofistic
 - **Métricas Financeiras:** Cálculo de totais, médias, concentração de compras e análise por fornecedor
 - **Relatórios Executivos:** Geração automática de relatórios em múltiplos formatos (Excel, CSV, PDF)
 
+- **Acesse aqui:** [Agente-NFs](https://agente-nfs.streamlit.app/)
+
 ---
 
 ## ✨ Características Principais
