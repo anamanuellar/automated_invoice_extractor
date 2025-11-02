@@ -138,7 +138,7 @@ O projeto é estruturado em **4 camadas** para garantir escalabilidade, manuteni
 
 1. **Clone o repositório:**
    ```bash
-   git clone https://github.com/seu-usuario/extrator-inteligente-notas-fiscais.git
+   git clone https://github.com/anamanuellar/automated_invoice_extractor.git
    cd extrator-inteligente-notas-fiscais
    ```
 
