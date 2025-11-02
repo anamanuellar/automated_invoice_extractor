@@ -14,6 +14,7 @@ import re
 import json
 import traceback
 import hashlib
+import time
 from pathlib import Path
 from datetime import datetime
 import requests
@@ -23,6 +24,16 @@ import pdfplumber
 import fitz  # PyMuPDF
 import streamlit as st
 from extrator_ia_itens_impostos import ExtractorIA
+
+# ===================== ENRIQUECIMENTO FISCAL VIA API =====================
+try:
+    from enriquecedor_fiscal_api import enriquecer_dataframe_fiscal, validar_nfs_com_ia_enriquecida
+    ENRIQUECEDOR_DISPONIVEL = True
+except ImportError:
+    ENRIQUECEDOR_DISPONIVEL = False
+    enriquecer_dataframe_fiscal = None
+    validar_nfs_com_ia_enriquecida = None
+    print("⚠️ Enriquecedor fiscal não disponível")
 
 
 
@@ -549,6 +560,25 @@ def processar_pdfs(
     # ✅ Retorna DataFrame com todos os resultados
     if notas_fiscais_extraidas:
         df_resultados = pd.DataFrame(notas_fiscais_extraidas)
+        
+        # ===================== ENRIQUECIMENTO FISCAL VIA API =====================
+        if ENRIQUECEDOR_DISPONIVEL and enriquecer_dataframe_fiscal is not None:
+            try:
+                if _progress_callback:
+                    _progress_callback("🌐 Enriquecendo dados fiscais via API...")
+                
+                df_resultados = enriquecer_dataframe_fiscal(
+                    df_resultados,
+                    coluna_cnpj="emitente_doc"
+                )
+                
+                if _progress_callback:
+                    _progress_callback("✅ Enriquecimento fiscal concluído")
+                    
+            except Exception as e:
+                if _progress_callback:
+                    _progress_callback(f"⚠️ Erro ao enriquecer dados: {str(e)}")
+        
         return df_resultados
     else:
         return pd.DataFrame()

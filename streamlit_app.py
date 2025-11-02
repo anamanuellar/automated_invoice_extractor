@@ -44,10 +44,17 @@ st.divider()
 # ========================= SIDEBAR =========================
 with st.sidebar:
     st.header("⚙️ Configurações")
+    
     enriquecer_cnpj = st.toggle(
         "Enriquecer dados via CNPJ",
         value=True,
         help="Busca razão social através de APIs públicas (BrasilAPI/ReceitaWS)"
+    )
+    
+    enriquecer_fiscal = st.toggle(
+        "Enriquecer com Análise Fiscal (IE, Simples Nacional)",
+        value=True,
+        help="Consulta ReceitaWS para IE status, regime tributário, optante Simples Nacional"
     )
 
     usar_ia = st.toggle(
@@ -68,6 +75,7 @@ with st.sidebar:
     **Funcionalidades principais:**
     - Extração automática de campos via Regex e OCR
     - Enriquecimento de CNPJs via API
+    - 🌟 **Análise Fiscal: IE, Simples Nacional, Regime**
     - IA opcional para extrair itens e impostos
     - Exportação para Excel e CSV
     """)
