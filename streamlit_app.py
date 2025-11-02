@@ -6,6 +6,14 @@ import os
 from extrator import processar_pdfs, exportar_para_excel_com_itens
 from extrator_ia_itens_impostos import ExtractorIA
 
+# ✨ NOVA: Importar análise fiscal + financeira
+try:
+    from analise_fiscal_financeira import gerar_analise_financeira_completa
+    ANALISE_DISPONIVEL = True
+except ImportError:
+    ANALISE_DISPONIVEL = False
+    gerar_analise_financeira_completa = None
+
 # ========================= CONFIGURAÇÃO BÁSICA =========================
 st.set_page_config(
     page_title="📄 Extrator Inteligente de Notas Fiscais",
@@ -184,6 +192,44 @@ if uploaded_files:
                 )
                 trend["data_emissao"] = trend["data_emissao"].astype(str)
                 st.line_chart(trend.set_index("data_emissao"))
+
+        # ========================= ANÁLISE FISCAL + FINANCEIRA =========================
+        st.divider()
+        st.subheader("📊 Análise Fiscal + Financeira Completa")
+        
+        st.markdown("""
+        Análise integrada com:
+        - 💰 Métricas financeiras (total, média, concentração)
+        - 🏢 Análise por fornecedor
+        - ⚠️ Alertas de compatibilidade fiscal
+        - 📋 Regime tributário do destinatário
+        """)
+        
+        # Input: Regime do destinatário
+        regime_destinatario = st.selectbox(
+            "Qual é o regime tributário da HOTEIS DESIGN S.A.?",
+            ["Simples Nacional", "Lucro Real", "Lucro Presumido", "Isento de IE"],
+            help="Selecione o regime tributário da sua empresa"
+        )
+        
+        if st.button("Gerar Análise Completa 📈", use_container_width=True):
+            if ANALISE_DISPONIVEL and gerar_analise_financeira_completa is not None:
+                try:
+                    analise_completa = gerar_analise_financeira_completa(df_result_ia, regime_destinatario)
+                    st.text(analise_completa)
+                    
+                    # Botão para download
+                    st.download_button(
+                        label="📥 Baixar Análise em Texto",
+                        data=analise_completa,
+                        file_name=f"analise_fiscal_financeira_{datetime.now():%Y%m%d_%H%M%S}.txt",
+                        mime="text/plain",
+                        use_container_width=True
+                    )
+                except Exception as e:
+                    st.error(f"Erro ao gerar análise: {e}")
+            else:
+                st.warning("Módulo de análise fiscal não disponível. Instale: analise_fiscal_financeira.py")
 
         # ========================= ANÁLISE COMPLETA DE IA =========================
         st.divider()
