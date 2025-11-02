@@ -22,6 +22,7 @@ import pandas as pd
 import pdfplumber
 import fitz  # PyMuPDF
 import streamlit as st
+from extrator_ia_itens_impostos import ExtractorIA
 
 # ===================== IA OPCIONAL =====================
 ExtractorIA: Optional[Any] = None
@@ -382,7 +383,17 @@ def extrair_dados_nf(
 
             if GEMINI_DISPONIVEL:
                 extractor_ia = ExtractorIA(api_key_gemini)
-                resultado_ia = extractor_ia.extrair_nf_completa(dados["texto_completo"])
+                # Suporta diferentes nomes de método na implementação de ExtractorIA
+                # tenta métodos comuns: extrair_nf_completa, extrair, extrair_nf, extrair_completa
+                metodo = None
+                for nome in ("extrair_nf_completa", "extrair", "extrair_nf", "extrair_completa"):
+                    if hasattr(extractor_ia, nome):
+                        metodo = getattr(extractor_ia, nome)
+                        break
+                if metodo is None:
+                    raise AttributeError("ExtractorIA não possui método de extração conhecido (procure por extrair_nf_completa/extrair/extrair_nf)")
+
+                resultado_ia = metodo(dados["texto_completo"]) or {}
 
                 dados["itens"] = resultado_ia.get("itens", [])
                 dados["impostos"] = resultado_ia.get("impostos", {})

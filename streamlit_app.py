@@ -1,173 +1,221 @@
-"""
-Módulo de IA para extração e análise fiscal inteligente
--------------------------------------------------------
-Suporte: Gemini | OpenAI | Hugging Face
-"""
+import streamlit as st
+import pandas as pd
+from datetime import datetime
+import tempfile
+import os
+from extrator import processar_pdfs, exportar_para_excel_com_itens
+from extrator_ia_itens_impostos import ExtractorIA
 
-from typing import Optional, Dict, Any, Union
-import json
-import re
+# ========================= CONFIGURAÇÃO BÁSICA =========================
+st.set_page_config(
+    page_title="📄 Extrator Inteligente de Notas Fiscais",
+    page_icon="💼",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
-# ========================= IMPORTS SEGUROS =========================
-# Inicializamos as libs com None para evitar alertas de "possibly unbound"
-genai = None
-OpenAI = None
-pipeline = None
+st.markdown("""
+<style>
+    .main { padding: 1.5rem; }
+    h1, h2, h3 { color: #1f77b4; }
+    .stMetric { text-align: center; }
+    div[data-testid="stMetricValue"] {
+        font-size: 1.6rem;
+        color: #004b8d;
+    }
+</style>
+""", unsafe_allow_html=True)
 
-try:
-    import google.generativeai as genai  # type: ignore
-    GEMINI_DISPONIVEL = True
-except Exception:
-    GEMINI_DISPONIVEL = False
+# ========================= CABEÇALHO =========================
+st.title("📄 Extrator Inteligente de Notas Fiscais")
+st.caption("Extraia informações de DANFEs em PDF, analise valores e exporte seus resultados.")
+st.divider()
 
-try:
-    from openai import OpenAI  # type: ignore
-    OPENAI_DISPONIVEL = True
-except Exception:
-    OPENAI_DISPONIVEL = False
+col1, col2, col3 = st.columns(3)
+with col1:
+    st.metric("Status", "🟢 Pronto", help="Sistema operacional OK")
+with col2:
+    st.metric("Versão", "2.0", help="Versão atual da aplicação")
+with col3:
+    st.metric("IA Integrada", "✅ Ativa", help="Suporte a Gemini, OpenAI e HuggingFace")
 
-try:
-    from transformers import pipeline  # type: ignore
-    HF_DISPONIVEL = True
-except Exception:
-    HF_DISPONIVEL = False
+st.divider()
 
+# ========================= SIDEBAR =========================
+with st.sidebar:
+    st.header("⚙️ Configurações")
+    enriquecer_cnpj = st.toggle(
+        "Enriquecer dados via CNPJ",
+        value=True,
+        help="Busca razão social através de APIs públicas (BrasilAPI/ReceitaWS)"
+    )
 
-class ExtractorIA:
-    """Classe unificada para extração e análise de DANFEs via IA."""
+    usar_ia = st.toggle(
+        "Ativar Análise com IA",
+        value=True,
+        help="Permite a extração de itens e impostos com modelos generativos"
+    )
 
-    def __init__(self, api_key: str, modelo_escolhido: str = "gemini"):
-        """
-        Inicializa o extrator de IA com base no modelo escolhido.
-        Opções válidas: gemini | openai | huggingface
-        """
-        self.api_key = api_key
-        self.modelo_escolhido = modelo_escolhido.lower().strip()
-        self.model: Optional[Union[Any, object]] = None
-        self.status: str = "❌ Modelo não inicializado"
+    api_key_ia = st.text_input(
+        "🔑 Chave de API (Gemini ou OpenAI)",
+        type="password",
+        help="Informe sua chave de API para ativar recursos de IA"
+    )
 
-        # ==================== GEMINI ====================
-        if self.modelo_escolhido == "gemini" and GEMINI_DISPONIVEL and genai is not None:
-            try:
-                genai.configure(api_key=self.api_key)
-                self.model = genai.GenerativeModel("gemini-1.5-flash")
-                self.status = "✅ Gemini conectado"
-            except Exception as e:
-                self.status = f"⚠️ Falha ao conectar Gemini: {e}"
+    st.markdown("---")
+    st.subheader("ℹ️ Sobre")
+    st.markdown("""
+    **Funcionalidades principais:**
+    - Extração automática de campos via Regex e OCR
+    - Enriquecimento de CNPJs via API
+    - IA opcional para extrair itens e impostos
+    - Exportação para Excel e CSV
+    """)
 
-        # ==================== OPENAI ====================
-        elif self.modelo_escolhido == "openai" and OPENAI_DISPONIVEL and OpenAI is not None:
-            try:
-                self.model = OpenAI(api_key=self.api_key)
-                self.status = "✅ OpenAI conectado"
-            except Exception as e:
-                self.status = f"⚠️ Falha ao conectar OpenAI: {e}"
+# ========================= UPLOAD DE ARQUIVOS =========================
+st.subheader("📤 Envie seus arquivos PDF de DANFE")
+uploaded_files = st.file_uploader(
+    "Selecione um ou mais arquivos PDF",
+    type=["pdf"],
+    accept_multiple_files=True
+)
 
-        # ==================== HUGGINGFACE ====================
-        elif self.modelo_escolhido == "huggingface" and HF_DISPONIVEL and pipeline is not None:
-            try:
-                self.model = pipeline("summarization", model="facebook/bart-large-cnn")
-                self.status = "✅ Hugging Face conectado"
-            except Exception as e:
-                self.status = f"⚠️ Falha ao conectar Hugging Face: {e}"
+if uploaded_files:
+    temp_dir = tempfile.mkdtemp()
+    pdf_paths = []
 
-        else:
-            self.status = "⚠️ Nenhum modelo de IA disponível"
+    for f in uploaded_files:
+        path = os.path.join(temp_dir, f.name)
+        with open(path, "wb") as out:
+            out.write(f.getbuffer())
+        pdf_paths.append(path)
 
-    # =======================================================
-    # EXTRAÇÃO COMPLETA DE NOTA FISCAL
-    # =======================================================
-    def extrair_nf_completa(self, texto: str) -> Dict[str, Any]:
-        """
-        Utiliza o modelo de IA para identificar itens e impostos
-        em um texto completo de DANFE.
-        """
-        if not texto or not self.model:
-            return {"erro": "IA não inicializada ou texto vazio"}
+    # Exibição de progresso
+    st.info("⏳ Processando arquivos...")
 
-        try:
-            prompt = f"""
-            Analise a DANFE a seguir e extraia os dados abaixo em formato JSON:
-            - Itens (descrição, quantidade, valor unitário, valor total)
-            - Impostos (ICMS, IPI, PIS, COFINS, regime tributário)
-            - Se um campo não estiver presente, use null.
-            DANFE:
-            {texto}
-            """
+    progress = st.progress(0)
+    messages = st.empty()
 
-            resposta = ""
+    def update_progress(msg):
+        messages.info(msg)
 
-            if self.modelo_escolhido == "gemini":
-                result = self.model.generate_content(prompt)
-                resposta = (result.text or "").strip()
+    # Execução da extração
+    df_result_ia = processar_pdfs(
+        pdf_paths,
+        _progress_callback=update_progress,
+        api_key_gemini=api_key_ia if usar_ia else None
+    )
 
-            elif self.modelo_escolhido == "openai":
-                chat = self.model.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[
-                        {"role": "system", "content": "Você é um especialista em DANFE e impostos."},
-                        {"role": "user", "content": prompt},
-                    ],
+    progress.progress(100)
+
+    if not df_result_ia.empty:
+        st.success(f"✅ {len(df_result_ia)} notas fiscais processadas com sucesso!")
+        st.divider()
+
+        # ========================= TABELA DE RESULTADOS =========================
+        st.markdown("### 📋 Dados extraídos")
+        colunas_visiveis = [
+            "arquivo", "numero_nf", "serie", "data_emissao",
+            "emitente_nome", "emitente_doc",
+            "dest_nome", "dest_doc",
+            "valor_total", "status"
+        ]
+
+        df_view = df_result_ia[[c for c in colunas_visiveis if c in df_result_ia.columns]]
+        st.dataframe(df_view, use_container_width=True, height=450)
+
+        # ========================= EXPORTAÇÕES =========================
+        st.divider()
+        st.subheader("📥 Exportar resultados")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.download_button(
+                label="💾 Exportar para Excel",
+                data=exportar_para_excel_com_itens(df_result_ia),
+                file_name=f"notas_fiscais_{datetime.now():%Y%m%d_%H%M%S}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+        with col2:
+            st.download_button(
+                label="📄 Exportar para CSV",
+                data=df_result_ia.to_csv(index=False).encode("utf-8"),
+                file_name=f"notas_fiscais_{datetime.now():%Y%m%d_%H%M%S}.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+        # ========================= ANÁLISES VISUAIS =========================
+        st.divider()
+        st.markdown("### 📊 Análises Gráficas")
+
+        df_result_ia["valor_total_num"] = pd.to_numeric(df_result_ia.get("valor_total_num", 0), errors="coerce")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown("**Top 5 Emitentes (por valor total)**")
+            if "emitente_nome" in df_result_ia.columns:
+                top_emit = (
+                    df_result_ia.groupby("emitente_nome")["valor_total_num"]
+                    .sum()
+                    .nlargest(5)
+                    .reset_index()
                 )
-                resposta = chat.choices[0].message.content.strip()
+                st.bar_chart(top_emit.set_index("emitente_nome"))
 
-            elif self.modelo_escolhido == "huggingface":
-                output = self.model(prompt[:4000], max_length=500, min_length=100, do_sample=False)
-                if isinstance(output, list) and "summary_text" in output[0]:
-                    resposta = output[0]["summary_text"]
+        with col2:
+            st.markdown("**Tendência Mensal (por data de emissão)**")
+            if "data_emissao" in df_result_ia.columns:
+                df_result_ia["data_emissao"] = pd.to_datetime(df_result_ia["data_emissao"], errors="coerce")
+                trend = (
+                    df_result_ia.groupby(df_result_ia["data_emissao"].dt.to_period("M"))["valor_total_num"]
+                    .sum()
+                    .reset_index()
+                )
+                trend["data_emissao"] = trend["data_emissao"].astype(str)
+                st.line_chart(trend.set_index("data_emissao"))
+
+        # ========================= ANÁLISE COMPLETA DE IA =========================
+        st.divider()
+        st.subheader("🤖 Análise Completa com IA")
+
+        st.markdown("""
+        Gere insights automáticos sobre as notas fiscais, com foco em:
+        - Padrões de fornecedores
+        - Tendências de valores
+        - Possíveis anomalias fiscais
+        """)
+
+        if st.button("Executar análise completa com IA 🚀", use_container_width=True):
+            st.info("🧠 Analisando dados via IA... (pode levar alguns segundos)")
+
+            try:
+                from extrator_ia_itens_impostos import ExtractorIA
+                if api_key_ia:
+                    model = ExtractorIA(api_key_ia)
+                    analise_texto = f"""
+                    Forneça uma análise executiva sobre os dados fiscais abaixo:
+                    {df_result_ia.head(10).to_string(index=False)}
+                    """
+                    resultado = model.analisar_texto(analise_texto)
+                    st.markdown("### 💡 Resultado da Análise:")
+                    st.write(resultado)
                 else:
-                    resposta = str(output)
+                    st.warning("Insira sua chave de API na barra lateral para executar a análise.")
+            except Exception as e:
+                st.error(f"Erro ao executar análise de IA: {e}")
 
-            else:
-                return {"erro": "Modelo IA inválido ou não configurado"}
+    else:
+        st.warning("Nenhuma nota fiscal pôde ser processada.")
+else:
+    st.info("👆 Envie um ou mais PDFs de DANFE para iniciar a extração.")
 
-            # Normaliza JSON
-            try:
-                json_start = resposta.find("{")
-                parsed = json.loads(resposta[json_start:])
-                return parsed
-            except Exception:
-                return {"resposta_livre": resposta}
-
-        except Exception as e:
-            return {"erro": str(e)}
-
-    # =======================================================
-    # ANÁLISE EXECUTIVA (INSIGHTS)
-    # =======================================================
-    def analisar_texto(self, texto: str) -> str:
-        """
-        Executa uma análise textual de alto nível com base no modelo selecionado.
-        Pode ser usado para gerar insights sobre dados fiscais.
-        """
-        if not texto or not self.model:
-            return "❌ Nenhum texto fornecido ou modelo não inicializado."
-
-        try:
-            if self.modelo_escolhido == "gemini":
-                result = self.model.generate_content(
-                    f"Analise o seguinte texto com foco em padrões financeiros e fiscais:\n\n{texto}"
-                )
-                return (result.text or "").strip()
-
-            elif self.modelo_escolhido == "openai":
-                chat = self.model.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[
-                        {"role": "system", "content": "Você é um analista tributário sênior."},
-                        {"role": "user", "content": f"Analise este texto e destaque tendências e anomalias:\n\n{texto}"},
-                    ],
-                )
-                return chat.choices[0].message.content.strip()
-
-            elif self.modelo_escolhido == "huggingface":
-                resumo = self.model(texto[:4000], max_length=200, min_length=50, do_sample=False)
-                if isinstance(resumo, list) and "summary_text" in resumo[0]:
-                    return resumo[0]["summary_text"]
-                return str(resumo)
-
-            else:
-                return "⚠️ Modelo de IA não configurado corretamente."
-
-        except Exception as e:
-            return f"❌ Erro ao processar análise de IA: {e}"
+# ========================= RODAPÉ =========================
+st.markdown("""
+---
+<div style="text-align:center; color:gray; font-size:13px;">
+💼 Extrator de Notas Fiscais Inteligente v2.0 — Desenvolvido com ❤️ por Manu Ribeiro
+</div>
+""", unsafe_allow_html=True)
