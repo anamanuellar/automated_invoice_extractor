@@ -131,37 +131,29 @@ def normalizar_valor_moeda(valor: Optional[str]) -> float:
     except (ValueError, TypeError):
         return np.nan
     
-def pick_last_money_on_same_or_next_lines(linhas: list, idx: int, max_ahead: int = 6) -> Optional[str]:
+def pick_first_money_on_same_or_next_lines(linhas: list, idx: int, max_ahead: int = 3) -> Optional[str]:
     """
-    Procura por valor monetário na linha atual ou nas próximas linhas.
-    Usa a regex RE_MOEDA para encontrar valores em formato brasileiro.
+    Procura por PRIMEIRO valor monetário na linha atual ou nas próximas linhas.
+    IMPORTANTE: Pega o PRIMEIRO valor (não o último) para evitar pegar valores
+    de linhas de informações complementares.
     
     Args:
         linhas: Lista de linhas de texto
         idx: Índice da linha atual
-        max_ahead: Número máximo de linhas à frente para procurar
+        max_ahead: Número máximo de linhas à frente para procurar (padrão: 3)
     
     Returns:
         String com valor em formato brasileiro (ex: "4.500,00") ou None
     """
-    def pick(line):
-        vals = RE_MOEDA.findall(line)
+    # Procura apenas nas próximas linhas (não inclui linha atual para evitar "VALOR TOTAL DA NOTA" etc)
+    for j in range(idx, min(idx + max_ahead, len(linhas))):
+        linha = linhas[j]
+        # Procura valores na linha
+        vals = RE_MOEDA.findall(linha)
+        # Filtra zeros e retorna o PRIMEIRO valor significativo
         vals = [v for v in vals if v != "0,00"]
-        return vals[-1] if vals else None
-    
-    # Procura na linha atual
-    v = pick(linhas[idx])
-    if v:
-        return v
-    
-    # Procura nas próximas linhas
-    for j in range(1, max_ahead + 1):
-        k = idx + j
-        if k >= len(linhas):
-            break
-        v = pick(linhas[k])
-        if v:
-            return v
+        if vals:
+            return vals[0]  # ← PRIMEIRO (não último!)
     
     return None
 
@@ -374,26 +366,28 @@ def extrair_nome_destinatario(texto: str) -> Optional[str]:
     return None
 
 def extrair_valor_total(texto: str) -> Optional[str]:
-    """Extrai VALOR TOTAL DA NOTA procurando na mesma linha ou nas próximas"""
+    """Extrai VALOR TOTAL DA NOTA procurando o PRIMEIRO valor nas próximas linhas"""
     
     if not texto:
         return None
     
     linhas = texto.split("\n")
     
-    # Procura pela linha "VALOR TOTAL DA NOTA" e pega o valor nas próximas linhas
+    # Procura pela linha "VALOR TOTAL DA NOTA" e pega o PRIMEIRO valor nas próximas linhas
     for i, ln in enumerate(linhas):
         up = ln.upper()
         if "VALOR TOTAL DA NOTA" in up:
-            # Tenta nas próximas linhas
-            v = pick_last_money_on_same_or_next_lines(linhas, i, 3)
+            # Tenta nas próximas 3 linhas (pega PRIMEIRO valor, não último)
+            v = pick_first_money_on_same_or_next_lines(linhas, i + 1, 3)
             if v:
                 return v
         # Fallback: busca também por "V. TOTAL PRODUTOS"
         if "V. TOTAL" in up and "PRODUTOS" in up:
-            v = pick_last_money_on_same_or_next_lines(linhas, i, 2)
+            v = pick_first_money_on_same_or_next_lines(linhas, i + 1, 2)
             if v:
                 return v
+    
+    return None
     
     return None
 
