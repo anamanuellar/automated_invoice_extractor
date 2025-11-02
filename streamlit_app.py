@@ -37,8 +37,8 @@ def limpar_cache():
     st.cache_data.clear()
 
 # ========================= GERAÇÃO DE PDF COM MÚLTIPLAS PÁGINAS =========================
-def gerar_pdf_completo(df: pd.DataFrame, regime: str, analise: str) -> Optional[bytes]:
-    """Gera PDF com múltiplas páginas para análise completa"""
+def gerar_pdf_completo(df: pd.DataFrame, regime: str, analise: str, analise_ia: Optional[str] = None) -> Optional[bytes]:
+    """Gera PDF com múltiplas páginas para análise completa (Fiscal + IA)"""
     if not PDF_DISPONIVEL:
         return None
     
@@ -54,13 +54,20 @@ def gerar_pdf_completo(df: pd.DataFrame, regime: str, analise: str) -> Optional[
         story = []
         styles = getSampleStyleSheet()
         
-        # Criar estilo customizado para análise
+        # Criar estilos customizados
         analise_style = ParagraphStyle(
             'Analise',
             parent=styles['Normal'],
             fontSize=10,
             leading=14,
             color='#333333'
+        )
+        
+        heading_ia_style = ParagraphStyle(
+            'HeadingIA',
+            parent=styles['Heading2'],
+            color='#1f77b4',
+            spaceAfter=12
         )
         
         # Extrair nome do destinatário
@@ -70,7 +77,7 @@ def gerar_pdf_completo(df: pd.DataFrame, regime: str, analise: str) -> Optional[
             if pd.notna(dest_nome) and str(dest_nome).strip():
                 nome_empresa = str(dest_nome).upper()
         
-        # PÁGINA 1: Cabeçalho
+        # ========================= PÁGINA 1: CABEÇALHO E ANÁLISE FISCAL =========================
         story.append(Paragraph("📊 ANÁLISE FISCAL E FINANCEIRA COMPLETA", styles['Heading1']))
         story.append(Paragraph(nome_empresa, styles['Heading2']))
         story.append(Spacer(1, 0.3*inch))
@@ -80,27 +87,24 @@ def gerar_pdf_completo(df: pd.DataFrame, regime: str, analise: str) -> Optional[
         story.append(Paragraph(f"<b>Total de Notas Fiscais:</b> {len(df)}", styles['Normal']))
         story.append(Spacer(1, 0.3*inch))
         
-        # Quebrar análise em linhas e adicionar com quebra de página automática
-        linhas_analise = analise.split('\n')
-        
-        # Adicionar linhas com controle de página
-        linhas_por_pagina = 0
-        max_linhas_pagina = 50  # Aproximadamente 50 linhas por página
-        
-        story.append(Paragraph("ANÁLISE DETALHADA", styles['Heading2']))
+        # Adicionar análise fiscal
+        story.append(Paragraph("ANÁLISE FISCAL E FINANCEIRA", styles['Heading2']))
         story.append(Spacer(1, 0.2*inch))
         
-        for i, linha in enumerate(linhas_analise):
+        linhas_analise = analise.split('\n')
+        linhas_por_pagina = 0
+        max_linhas_pagina = 40  # Linhas por página
+        
+        for linha in linhas_analise:
             if linha.strip():
-                # Adicionar quebra de página a cada ~50 linhas
+                # Adicionar quebra de página
                 if linhas_por_pagina >= max_linhas_pagina:
                     story.append(PageBreak())
                     linhas_por_pagina = 0
                 
-                # Limpar HTML e escapar caracteres especiais
+                # Limpar e formatar
                 texto_limpo = linha.replace('<', '&lt;').replace('>', '&gt;')[:200]
                 
-                # Determinar se é seção (em branco antes) ou linha normal
                 if texto_limpo.startswith('='):
                     story.append(Spacer(1, 0.1*inch))
                     story.append(Paragraph(f"<b>{texto_limpo}</b>", styles['Normal']))
@@ -114,10 +118,54 @@ def gerar_pdf_completo(df: pd.DataFrame, regime: str, analise: str) -> Optional[
                 
                 linhas_por_pagina += 1
         
-        # Página final: Rodapé
-        story.append(Spacer(1, 0.5*inch))
-        story.append(Paragraph("---", styles['Normal']))
+        # ========================= PÁGINA N: ANÁLISE COM IA =========================
+        if analise_ia:
+            story.append(PageBreak())
+            story.append(Paragraph("🤖 ANÁLISE COM INTELIGÊNCIA ARTIFICIAL", heading_ia_style))
+            story.append(Spacer(1, 0.2*inch))
+            
+            linhas_ia = analise_ia.split('\n')
+            linhas_por_pagina = 0
+            
+            for linha in linhas_ia:
+                if linha.strip():
+                    # Adicionar quebra de página
+                    if linhas_por_pagina >= max_linhas_pagina:
+                        story.append(PageBreak())
+                        linhas_por_pagina = 0
+                    
+                    # Limpar e formatar
+                    texto_limpo = linha.replace('<', '&lt;').replace('>', '&gt;')[:200]
+                    
+                    if texto_limpo.startswith('##'):
+                        story.append(Spacer(1, 0.15*inch))
+                        story.append(Paragraph(f"<b>{texto_limpo.replace('##', '')}</b>", styles['Heading3']))
+                        story.append(Spacer(1, 0.1*inch))
+                    elif texto_limpo.startswith('-') or texto_limpo.startswith('•'):
+                        story.append(Paragraph(f"  {texto_limpo}", analise_style))
+                    elif texto_limpo.startswith('**') and texto_limpo.endswith('**'):
+                        story.append(Paragraph(f"<b>{texto_limpo.replace('**', '')}</b>", styles['Normal']))
+                    else:
+                        story.append(Paragraph(texto_limpo, analise_style))
+                    
+                    linhas_por_pagina += 1
+        
+        # ========================= PÁGINA FINAL: RODAPÉ =========================
+        story.append(PageBreak())
+        story.append(Spacer(1, 1*inch))
+        story.append(Paragraph("="*80, styles['Normal']))
+        story.append(Spacer(1, 0.3*inch))
+        story.append(Paragraph(
+            f"Relatório gerado em {datetime.now().strftime('%d/%m/%Y às %H:%M:%S')}", 
+            styles['Normal']
+        ))
+        story.append(Paragraph("Extrator Inteligente de Notas Fiscais v2.4", styles['Normal']))
+        story.append(Paragraph("Análise Fiscal + Financeira + Inteligência Artificial", styles['Normal']))
         story.append(Spacer(1, 0.2*inch))
+        story.append(Paragraph(
+            "✅ Relatório completo com análise profissional e insights de IA",
+            styles['Normal']
+        ))
         story.append(Paragraph(
             f"Relatório gerado automaticamente em {datetime.now().strftime('%d/%m/%Y às %H:%M:%S')}", 
             styles['Normal']
@@ -492,7 +540,15 @@ Por favor, forneça uma análise executiva focando em:
         if 'analise' in st.session_state and PDF_DISPONIVEL:
             if st.button("🔴 Gerar PDF", use_container_width=True):
                 with st.spinner("⏳ Gerando PDF com múltiplas páginas..."):
-                    pdf_data = gerar_pdf_completo(df_result_ia, st.session_state['regime'], st.session_state['analise'])
+                    # Passar análise IA se disponível
+                    analise_ia = st.session_state.get('analise_ia', None)
+                    
+                    pdf_data = gerar_pdf_completo(
+                        df_result_ia, 
+                        st.session_state['regime'], 
+                        st.session_state['analise'],
+                        analise_ia
+                    )
                     if pdf_data:
                         st.download_button(
                             label="📥 Baixar PDF Completo",
@@ -501,7 +557,10 @@ Por favor, forneça uma análise executiva focando em:
                             mime="application/pdf",
                             use_container_width=True,
                         )
-                        st.success("✅ PDF gerado com sucesso!")
+                        if analise_ia:
+                            st.success("✅ PDF gerado com sucesso! (Análise Fiscal + IA)")
+                        else:
+                            st.success("✅ PDF gerado com sucesso! (Análise Fiscal)")
         elif 'analise' not in st.session_state:
             st.info("💡 Gere a análise fiscal acima primeiro")
         elif not PDF_DISPONIVEL:
@@ -516,7 +575,7 @@ else:
 st.markdown("""
 ---
 <div style="text-align:center; color:gray; font-size:13px;">
-💼 Extrator de Notas Fiscais v2.4 – Desenvolvido com ❤️<br>
+💼 Extrator de Notas Fiscais v2.4 – Desenvolvido por Ana Manuella da S. Ribeiro e Letivan Gonçalves de Mendonça Filho<br>
 🚀 Com análise fiscal avançada e exportação em Excel/CSV/PDF
 </div>
 """, unsafe_allow_html=True)
