@@ -24,6 +24,8 @@ import fitz  # PyMuPDF
 import streamlit as st
 from extrator_ia_itens_impostos import ExtractorIA
 
+
+
 # ===================== IA OPCIONAL =====================
 ExtractorIA: Optional[Any] = None
 try:
@@ -74,6 +76,25 @@ def salvar_cache_nf(hash_pdf: str, data: Dict[str, Any]) -> None:
         print(f"Erro ao salvar cache: {e}")
 
 
+# ===================== REGEX DE CAMPOS =====================
+RE_NUMERO = re.compile(
+    r"N[°ºO]?[:\.]?\s*(?:000\.)?(\d{3}(?:\.\d{3})*(?:\.\d{3})?)",
+    re.IGNORECASE
+)
+RE_SERIE = re.compile(r"S[ÉE]RIE\s*[:\-]?\s*(\d+)")
+RE_CNPJ = re.compile(r"\b\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}\b")
+RE_VALOR_TOTAL = re.compile(
+    r"(?:V\.?[\s\.]?TOTAL[\s\.]?(?:DA[\s\.]?NOTA|NF|PRODUTOS|GERAL)?|"
+    r"VALOR[\s\.]?TOTAL[\s\.]?(?:DA[\s\.]?NOTA|NF|PRODUTOS|GERAL)?|"
+    r"TOTAL[\s\.]?DA[\s\.]?(?:NOTA|NF)|"
+    r"VALOR[\s\.]?DA[\s\.]?(?:NOTA|NF))"
+    r"\s*R?\$?\s*"
+    r"(\d{1,3}(?:\.\d{3})*,\d{2})",
+    re.IGNORECASE | re.MULTILINE
+)
+RE_DATA = re.compile(r"\b\d{2}/\d{2}/\d{4}\b")
+RE_MOEDA = re.compile(r"R?\$?\s*(\d{1,3}(?:\.\d{3})*,\d{2})")
+
 # ===================== FUNÇÕES AUXILIARES =====================
 
 def limpar_string(texto: Optional[Any]) -> str:
@@ -109,6 +130,41 @@ def normalizar_valor_moeda(valor: Optional[str]) -> float:
         return float(valor_str)
     except (ValueError, TypeError):
         return np.nan
+    
+def pick_last_money_on_same_or_next_lines(linhas: list, idx: int, max_ahead: int = 6) -> Optional[str]:
+    """
+    Procura por valor monetário na linha atual ou nas próximas linhas.
+    Usa a regex RE_MOEDA para encontrar valores em formato brasileiro.
+    
+    Args:
+        linhas: Lista de linhas de texto
+        idx: Índice da linha atual
+        max_ahead: Número máximo de linhas à frente para procurar
+    
+    Returns:
+        String com valor em formato brasileiro (ex: "4.500,00") ou None
+    """
+    def pick(line):
+        vals = RE_MOEDA.findall(line)
+        vals = [v for v in vals if v != "0,00"]
+        return vals[-1] if vals else None
+    
+    # Procura na linha atual
+    v = pick(linhas[idx])
+    if v:
+        return v
+    
+    # Procura nas próximas linhas
+    for j in range(1, max_ahead + 1):
+        k = idx + j
+        if k >= len(linhas):
+            break
+        v = pick(linhas[k])
+        if v:
+            return v
+    
+    return None
+
 
 # ===================== OCR E EXTRAÇÃO DE TEXTO =====================
 
@@ -146,23 +202,6 @@ def extrair_texto_completo(pdf_path: str) -> str:
     return texto
 
 
-# ===================== REGEX DE CAMPOS =====================
-RE_NUMERO = re.compile(
-    r"N[°ºO]?[:\.]?\s*(?:000\.)?(\d{3}(?:\.\d{3})*(?:\.\d{3})?)",
-    re.IGNORECASE
-)
-RE_SERIE = re.compile(r"S[ÉE]RIE\s*[:\-]?\s*(\d+)")
-RE_CNPJ = re.compile(r"\b\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}\b")
-RE_VALOR_TOTAL = re.compile(
-    r"(?:V\.?[\s\.]?TOTAL[\s\.]?(?:DA[\s\.]?NOTA|NF|PRODUTOS|GERAL)?|"
-    r"VALOR[\s\.]?TOTAL[\s\.]?(?:DA[\s\.]?NOTA|NF|PRODUTOS|GERAL)?|"
-    r"TOTAL[\s\.]?DA[\s\.]?(?:NOTA|NF)|"
-    r"VALOR[\s\.]?DA[\s\.]?(?:NOTA|NF))"
-    r"\s*R?\$?\s*"
-    r"(\d{1,3}(?:\.\d{3})*,\d{2})",
-    re.IGNORECASE | re.MULTILINE
-)
-RE_DATA = re.compile(r"\b\d{2}/\d{2}/\d{4}\b")
 
 
 # ===================== ENRIQUECIMENTO VIA CNPJ (API) =====================
@@ -334,22 +373,27 @@ def extrair_nome_destinatario(texto: str) -> Optional[str]:
                     return nome_candidato
     return None
 
-
 def extrair_valor_total(texto: str) -> Optional[str]:
-    """Extrai VALOR TOTAL DA NOTA com precisão"""
+    """Extrai VALOR TOTAL DA NOTA procurando na mesma linha ou nas próximas"""
     
     if not texto:
         return None
     
-    # Busca pela linha exata: "VALOR TOTAL DA NOTA" seguida do valor
-    match = re.search(
-        r"VALOR\s+TOTAL\s+DA\s+NOTA\s+(\d{1,3}(?:\.\d{3})*,\d{2})",
-        texto,
-        re.IGNORECASE | re.MULTILINE
-    )
+    linhas = texto.split("\n")
     
-    if match:
-        return match.group(1).strip()
+    # Procura pela linha "VALOR TOTAL DA NOTA" e pega o valor nas próximas linhas
+    for i, ln in enumerate(linhas):
+        up = ln.upper()
+        if "VALOR TOTAL DA NOTA" in up:
+            # Tenta nas próximas linhas
+            v = pick_last_money_on_same_or_next_lines(linhas, i, 3)
+            if v:
+                return v
+        # Fallback: busca também por "V. TOTAL PRODUTOS"
+        if "V. TOTAL" in up and "PRODUTOS" in up:
+            v = pick_last_money_on_same_or_next_lines(linhas, i, 2)
+            if v:
+                return v
     
     return None
 
