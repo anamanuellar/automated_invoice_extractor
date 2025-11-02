@@ -89,10 +89,17 @@ def limpar_string(texto: Optional[Any]) -> str:
 
 
 def normalizar_valor_moeda(valor: Optional[str]) -> float:
-    """Converte R$ 1.234,56 → 1234.56."""
+    """
+    CORRIGIDO: Converte R$ 1.234,56 → 1234.56.
+    A correção garante que o ponto de milhar seja removido antes da vírgula decimal ser trocada por ponto.
+    """
     if not valor:
         return np.nan
-    valor_str = str(valor).replace("R$", "").replace("r$", "").replace('.', '').replace(',', '.').strip()
+    valor_str = str(valor).replace("R$", "").replace("r$", "").strip()
+    # Remove ponto de milhar, mas mantém a vírgula decimal
+    valor_str = re.sub(r'\.(?=\d{3},)', '', valor_str)
+    # Troca vírgula decimal por ponto
+    valor_str = valor_str.replace(',', '.')
     try:
         return float(valor_str)
     except ValueError:
@@ -187,7 +194,7 @@ def consulta_cnpj_api(cnpj: str, cache: Dict[str, Optional[str]]) -> Optional[st
     # 1️⃣ BrasilAPI
     try:
         url_brasil = f"https://brasilapi.com.br/api/cnpj/v1/{cnpj_digits}"
-        resp = requests.get(url_brasil, timeout=6)
+        resp = requests.get(url_brasil, timeout=6 )
         if resp.status_code == 200:
             data = resp.json()
             nome_empresarial = data.get("razao_social") or data.get("nome_fantasia")
@@ -198,7 +205,7 @@ def consulta_cnpj_api(cnpj: str, cache: Dict[str, Optional[str]]) -> Optional[st
     if not nome_empresarial:
         try:
             url_receita = f"https://www.receitaws.com.br/v1/cnpj/{cnpj_digits}"
-            resp = requests.get(url_receita, timeout=6)
+            resp = requests.get(url_receita, timeout=6 )
             if resp.status_code == 200:
                 data = resp.json()
                 if data.get("status") == "OK":
@@ -314,8 +321,6 @@ def extrair_valor_total(texto: str) -> Optional[str]:
     return None
 
 
-# ===================== EXTRAÇÃO PRINCIPAL =====================
-
 def extrair_dados_nf(
     pdf_path: str,
     enriquecer_cnpj: bool = True,         # ✅ adiciona suporte ao enriquecimento via API
@@ -394,10 +399,26 @@ def extrair_dados_nf(
                     raise AttributeError("ExtractorIA não possui método de extração conhecido (procure por extrair_nf_completa/extrair/extrair_nf)")
 
                 resultado_ia = metodo(dados["texto_completo"]) or {}
-
-                dados["itens"] = resultado_ia.get("itens", [])
-                dados["impostos"] = resultado_ia.get("impostos", {})
-                dados["extracao_ia"] = True
+                
+                # CORREÇÃO: Adiciona o parsing do JSON retornado pela IA
+                json_string = resultado_ia.get("resposta", "")
+                if json_string:
+                    try:
+                        # Tenta extrair o bloco JSON se a IA o envolveu em markdown (ex: ```json{...}```)
+                        json_match = re.search(r"```json\s*([\s\S]*?)\s*```", json_string)
+                        if json_match:
+                            json_string = json_match.group(1)
+                        
+                        # Tenta fazer o parsing do JSON
+                        resultado_ia_parsed = json.loads(json_string)
+                        
+                        dados["itens"] = resultado_ia_parsed.get("itens", [])
+                        dados["impostos"] = resultado_ia_parsed.get("impostos", {})
+                        dados["extracao_ia"] = True
+                    except json.JSONDecodeError:
+                        dados["erro_ia"] = "Falha ao decodificar JSON da IA. Conteúdo: " + json_string[:100]
+                        dados["extracao_ia"] = False
+                # FIM DA CORREÇÃO
 
         except Exception as e:
             dados["erro_ia"] = str(e)
