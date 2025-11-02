@@ -175,10 +175,9 @@ def gerar_analise_completa(df: pd.DataFrame, regime_destinatario: str) -> str:
     por_fornecedor = analisar_por_fornecedor(df)
     
     relatorio = f"""
-╔════════════════════════════════════════════════════════════════════════════════╗
-║              📊 ANÁLISE EXECUTIVA - FISCAL + FINANCEIRA                        ║
-║                    HOTEIS DESIGN S.A. - Notas de Entrada                      ║
-╚════════════════════════════════════════════════════════════════════════════════╝
+════════════════════════════════════════════════════════════════════════════════
+              📊 ANÁLISE EXECUTIVA - FISCAL + FINANCEIRA                        
+                                         
 
 📌 DESTINATÁRIO: HOTEIS DESIGN S.A.
 Regime: {regime_destinatario}

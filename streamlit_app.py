@@ -1,314 +1,359 @@
-import streamlit as st
+"""
+Análise Executiva - Fiscal + Financeira com DETALHAMENTO DE IMPACTO CFOP
+- Regime do destinatário (seleção do usuário)
+- Nome do destinatário (extraído dinamicamente)
+- Extração automática de regime por CNPJ
+- DETALHE: Impacto financeiro se CFOP estiver incorreto
+"""
+
 import pandas as pd
-import plotly.graph_objects as go
-import plotly.express as px
+from typing import Dict, Any, List
 from datetime import datetime
-import tempfile
-import os
-import gc
-from typing import Optional
-from extrator import processar_pdfs, exportar_para_excel_com_itens
-from extrator_ia_itens_impostos import ExtractorIA
 
-# ✨ PDF é opcional - apenas para exportação
-PDF_DISPONIVEL = False
 try:
-    from reportlab.lib.pagesizes import letter, A4
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.lib.units import inch
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, Table, TableStyle
-    from reportlab.lib import colors
-    from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_JUSTIFY
-    PDF_DISPONIVEL = True
-except ImportError:
-    pass
+    from enriquecedor_fiscal_api import enriquecer_cnpj
+except:
+    def enriquecer_cnpj(cnpj):
+        return {"regime_tributario": "Desconhecido"}
 
-# ✨ Análise fiscal é opcional
-ANALISE_DISPONIVEL = False
-try:
-    from analise_fiscal_financeira import gerar_analise_completa as gerar_analise_financeira_completa
-    ANALISE_DISPONIVEL = True
-except ImportError:
-    gerar_analise_financeira_completa = None
-
-# ========================= LIMPEZA DE MEMÓRIA =========================
-def limpar_cache():
-    gc.collect()
-    st.cache_data.clear()
-
-# ========================= GERAÇÃO DE PDF SIMPLES =========================
-def gerar_pdf_simples(df: pd.DataFrame, regime: str, analise: str) -> Optional[bytes]:
-    """Gera PDF simples com dados (sem gráficos complexos)"""
-    if not PDF_DISPONIVEL:
-        return None
-    
-    # Importar dentro da função para evitar "possibly unbound"
+def obter_regime_do_cnpj(cnpj: str) -> str:
+    """Obtém regime tributário do CNPJ"""
     try:
-        from reportlab.lib.pagesizes import letter
-        from reportlab.lib.styles import getSampleStyleSheet
-        from reportlab.lib.units import inch
-        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
-        from io import BytesIO
-        
-        buffer = BytesIO()
-        doc = SimpleDocTemplate(buffer, pagesize=letter, topMargin=0.4*inch, bottomMargin=0.4*inch)
-        story = []
-        styles = getSampleStyleSheet()
-        
-        # Título
-        story.append(Paragraph("📊 ANÁLISE FISCAL + FINANCEIRA", styles['Heading1']))
-        story.append(Paragraph("HOTEIS DESIGN S.A.", styles['Heading2']))
-        story.append(Spacer(1, 0.2*inch))
-        
-        # Informações
-        story.append(Paragraph(f"<b>Regime:</b> {regime}", styles['Normal']))
-        story.append(Paragraph(f"<b>Data:</b> {datetime.now().strftime('%d/%m/%Y %H:%M')}", styles['Normal']))
-        story.append(Paragraph(f"<b>Total NFs:</b> {len(df)}", styles['Normal']))
-        story.append(Spacer(1, 0.3*inch))
-        
-        # Análise
-        story.append(Paragraph("ANÁLISE DETALHADA", styles['Heading2']))
-        for linha in analise.split('\n')[:50]:
-            if linha.strip():
-                story.append(Paragraph(linha[:100], styles['Normal']))
-        
-        doc.build(story)
-        buffer.seek(0)
-        return buffer.getvalue()
-    except Exception as e:
-        st.error(f"Erro ao gerar PDF: {e}")
-        return None
+        dados = enriquecer_cnpj(cnpj)
+        return dados.get("regime_tributario", "Desconhecido")
+    except:
+        return "Desconhecido"
 
-# ========================= CONFIGURAÇÃO BÁSICA =========================
-st.set_page_config(
-    page_title="🔖 Extrator Inteligente de Notas Fiscais",
-    page_icon="💼",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+def enriquecer_regimes_emitentes(df: pd.DataFrame) -> pd.DataFrame:
+    """Enriquece DataFrame com regime dos emitentes"""
+    df_novo = df.copy()
+    df_novo["regime_emitente"] = df_novo["emitente_doc"].apply(obter_regime_do_cnpj)
+    return df_novo
 
-st.markdown("""
-<style>
-    .main { padding: 1.5rem; }
-    h1, h2, h3 { color: #1f77b4; }
-    .grafico-container {
-        background-color: #f8f9fa;
-        padding: 1.5rem;
-        border-radius: 8px;
-        margin: 1rem 0;
-        border-left: 4px solid #1f77b4;
+def calcular_metricas_financeiras(df: pd.DataFrame) -> Dict[str, Any]:
+    """Calcula métricas financeiras"""
+    df_num = df.copy()
+    df_num["valor_total_num"] = pd.to_numeric(df_num["valor_total_num"], errors="coerce").fillna(0)
+    
+    total = df_num["valor_total_num"].sum()
+    media = df_num["valor_total_num"].mean()
+    maior = df_num["valor_total_num"].max()
+    menor = df_num["valor_total_num"].min()
+    
+    top3_total = df_num.nlargest(3, "valor_total_num")["valor_total_num"].sum()
+    concentracao = (top3_total / total * 100) if total > 0 else 0
+    
+    return {
+        "total": total,
+        "media": media,
+        "maior": maior,
+        "menor": menor,
+        "quantidade_nfs": len(df),
+        "concentracao_top3": concentracao,
     }
-</style>
-""", unsafe_allow_html=True)
 
-# ========================= CABEÇALHO =========================
-st.title("🔖 Extrator Inteligente de Notas Fiscais")
-st.caption("Extraia informações de DANFEs em PDF, analise valores e exporte seus resultados.")
-st.divider()
-
-col1, col2, col3 = st.columns(3)
-with col1:
-    st.metric("Status", "🟢 Pronto", help="Sistema operacional OK")
-with col2:
-    st.metric("Versão", "2.4", help="Versão otimizada")
-with col3:
-    st.metric("IA Integrada", "✅ Ativa", help="Suporte a Gemini, OpenAI e HuggingFace")
-
-st.divider()
-
-# ========================= SIDEBAR =========================
-with st.sidebar:
-    st.header("⚙️ Configurações")
+def analisar_por_fornecedor(df: pd.DataFrame) -> pd.DataFrame:
+    """Agrupa por fornecedor"""
+    grupo = df.groupby("emitente_nome").agg({
+        "valor_total_num": ["sum", "mean", "count"],
+        "emitente_doc": "first",
+        "regime_emitente": "first",
+    }).reset_index()
     
-    enriquecer_cnpj = st.toggle("Enriquecer dados via CNPJ", value=True)
-    enriquecer_fiscal = st.toggle("Enriquecer com Análise Fiscal", value=True)
-    usar_ia = st.toggle("Ativar Análise com IA", value=True)
-    api_key_ia = st.text_input("🔐 Chave de API (Gemini ou OpenAI)", type="password")
+    grupo.columns = ["Fornecedor", "Total", "Média", "Quantidade", "CNPJ", "Regime"]
+    grupo = grupo.sort_values("Total", ascending=False)
+    return grupo
+
+def calcular_impacto_cfop_incorreto(df: pd.DataFrame, aliquota_icms: float = 0.18) -> Dict[str, Any]:
+    """
+    Calcula impacto financeiro se CFOP estiver incorreto
+    Para IE isenta: CFOP correto é 5.949 (isento), incorreto seria 5.102 (tributado)
+    """
+    impacto = {
+        "nfs_com_risco": [],
+        "total_valor_em_risco": 0.0,
+        "icms_indevido_total": 0.0,
+        "pis_indevido_total": 0.0,
+        "cofins_indevido_total": 0.0,
+        "imposto_total_indevido": 0.0,
+        "valor_final_com_imposto": 0.0
+    }
     
-    if st.button("🧹 Limpar Cache/Memória", use_container_width=True):
-        limpar_cache()
-        st.success("✅ Cache e memória limpos!")
-        st.rerun()
-
-    st.markdown("---")
-    st.subheader("ℹ️ Sobre")
-    st.markdown("""
-    **Funcionalidades:**
-    - 📄 Extração automática de DANFEs
-    - 🧠 Enriquecimento de CNPJs via API
-    - 📊 Análise fiscal + financeira
-    - 📈 Gráficos interativos
-    - 📥 Exportação Excel/CSV
-    - 🤖 IA integrada
-    - 📄 PDF com análise
-    """)
-
-# ========================= UPLOAD DE ARQUIVOS =========================
-st.subheader("📤 Envie seus arquivos PDF de DANFE")
-uploaded_files = st.file_uploader("Selecione um ou mais PDFs", type=["pdf"], accept_multiple_files=True)
-
-if uploaded_files:
-    temp_dir = tempfile.mkdtemp()
-    pdf_paths = []
-
-    for f in uploaded_files:
-        path = os.path.join(temp_dir, f.name)
-        with open(path, "wb") as out:
-            out.write(f.getbuffer())
-        pdf_paths.append(path)
-
-    st.info("⏳ Processando arquivos...")
+    for idx, row in df.iterrows():
+        valor = row.get("valor_total_num", 0)
+        nf = row.get("numero_nf")
+        emitente = row.get("emitente_nome")
+        regime = row.get("regime_emitente", "Desconhecido")
+        
+        # Só calcula para fornecedores com regime identificado e não Simples Nacional
+        if regime in ["Lucro Real/Presumido"]:
+            # Cenário: CFOP incorreto = 5.102 (tributado) em vez de 5.949 (isento)
+            icms = valor * aliquota_icms
+            pis = valor * 0.0165  # 1.65% para Lucro Real
+            cofins = valor * 0.0765  # 7.65% para Lucro Real
+            
+            total_imposto = icms + pis + cofins
+            
+            impacto["nfs_com_risco"].append({
+                "numero_nf": nf,
+                "emitente": emitente,
+                "valor_nf": valor,
+                "icms_indevido": icms,
+                "pis_indevido": pis,
+                "cofins_indevido": cofins,
+                "total_imposto_indevido": total_imposto,
+                "valor_final_com_imposto": valor + total_imposto
+            })
+            
+            impacto["total_valor_em_risco"] += valor
+            impacto["icms_indevido_total"] += icms
+            impacto["pis_indevido_total"] += pis
+            impacto["cofins_indevido_total"] += cofins
+            impacto["imposto_total_indevido"] += total_imposto
+            impacto["valor_final_com_imposto"] += valor + total_imposto
     
-    df_result_ia = processar_pdfs(pdf_paths, api_key_gemini=api_key_ia if usar_ia else None)
+    return impacto
 
-    if not df_result_ia.empty:
-        st.success(f"✅ {len(df_result_ia)} notas fiscais processadas!")
-        st.divider()
+def gerar_relatorio_impacto_cfop(impacto: Dict[str, Any]) -> str:
+    """Gera relatório detalhado de impacto CFOP incorreto"""
+    
+    relatorio = """
+════════════════════════════════════════════════════════════════════════════════
 
-        # ========================= TABELA =========================
-        st.markdown("### 📋 Dados extraídos")
-        colunas_visiveis = ["arquivo", "numero_nf", "serie", "data_emissao", "emitente_nome", "dest_nome", "valor_total", "status"]
-        df_view = df_result_ia[[c for c in colunas_visiveis if c in df_result_ia.columns]]
-        st.dataframe(df_view, use_container_width=True, height=450)
+⚠️  CENÁRIO: CFOP INCORRETO (5.102 Tributado vs 5.949 Isento)
 
-        # ========================= EXPORTAÇÕES =========================
-        st.divider()
-        st.subheader("📥 Exportar dados (Excel e CSV)")
+IMPACTO FINANCEIRO ESTIMADO:
 
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.download_button(
-                label="💾 Exportar para Excel",
-                data=exportar_para_excel_com_itens(df_result_ia),
-                file_name=f"notas_fiscais_{datetime.now():%Y%m%d_%H%M%S}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-            )
-        
-        with col2:
-            st.download_button(
-                label="📄 Exportar para CSV",
-                data=df_result_ia.to_csv(index=False).encode("utf-8"),
-                file_name=f"notas_fiscais_{datetime.now():%Y%m%d_%H%M%S}.csv",
-                mime="text/csv",
-                use_container_width=True,
-            )
+"""
+    
+    if len(impacto["nfs_com_risco"]) == 0:
+        relatorio += "✅ Nenhuma NF com risco identificada"
+        return relatorio
+    
+    relatorio += f"""
+RESUMO DO RISCO:
+  • Quantidade de NFs em risco: {len(impacto['nfs_com_risco'])}
+  • Valor total em risco: R$ {impacto['total_valor_em_risco']:,.2f}
+  
+  • ICMS indevido total: R$ {impacto['icms_indevido_total']:,.2f}
+  • PIS indevido total: R$ {impacto['pis_indevido_total']:,.2f}
+  • COFINS indevido total: R$ {impacto['cofins_indevido_total']:,.2f}
+  ════════════════════════════════
+  • IMPOSTO TOTAL INDEVIDO: R$ {impacto['imposto_total_indevido']:,.2f}
+  
+  VALOR FINAL (se CFOP incorreto): R$ {impacto['valor_final_com_imposto']:,.2f}
 
-        # ========================= GRÁFICOS =========================
-        st.divider()
-        st.markdown("### 📊 Análises Gráficas")
+ANÁLISE DETALHADA POR NF:
 
-        df_result_ia["valor_total_num"] = pd.to_numeric(df_result_ia.get("valor_total_num", 0), errors="coerce")
+"""
+    
+    for nf_info in impacto["nfs_com_risco"]:
+        relatorio += f"""
+NF {nf_info['numero_nf']} - {nf_info['emitente']}
+  Valor Original: R$ {nf_info['valor_nf']:,.2f}
+  
+  Impostos Indevidos:
+    • ICMS (18%): R$ {nf_info['icms_indevido']:,.2f}
+    • PIS (1,65%): R$ {nf_info['pis_indevido']:,.2f}
+    • COFINS (7,65%): R$ {nf_info['cofins_indevido']:,.2f}
+    ─────────────────────────────
+    • Total de Impostos: R$ {nf_info['total_imposto_indevido']:,.2f}
+  
+  Valor Final (com impostos): R$ {nf_info['valor_final_com_imposto']:,.2f}
+  % de aumento: {(nf_info['total_imposto_indevido']/nf_info['valor_nf']*100):.2f}%
 
-        # Gráfico 1
-        st.markdown('<div class="grafico-container">', unsafe_allow_html=True)
-        st.subheader("📈 Top 5 Emitentes")
-        
-        if "emitente_nome" in df_result_ia.columns:
-            top_emit = df_result_ia.groupby("emitente_nome")["valor_total_num"].sum().nlargest(5).reset_index()
-            top_emit.columns = ["Emitente", "Valor"]
-            
-            fig1 = px.bar(top_emit, x="Emitente", y="Valor", color_discrete_sequence=["#1f77b4"])
-            fig1.update_layout(height=400, showlegend=False)
-            st.plotly_chart(fig1, use_container_width=True)
-        
-        st.markdown('</div>', unsafe_allow_html=True)
+"""
+    
+    return relatorio
 
-        # Gráfico 2
-        st.markdown('<div class="grafico-container">', unsafe_allow_html=True)
-        st.subheader("📅 Tendência Mensal")
-        
-        if "data_emissao" in df_result_ia.columns:
-            df_result_ia["data_emissao"] = pd.to_datetime(df_result_ia["data_emissao"], errors="coerce")
-            trend = df_result_ia.groupby(df_result_ia["data_emissao"].dt.to_period("M"))["valor_total_num"].sum().reset_index()
-            trend["data_emissao"] = trend["data_emissao"].astype(str)
-            trend.columns = ["Período", "Valor"]
-            
-            fig2 = px.line(trend, x="Período", y="Valor", markers=True, color_discrete_sequence=["#2ca02c"])
-            fig2.update_layout(height=400, showlegend=False)
-            st.plotly_chart(fig2, use_container_width=True)
-        
-        st.markdown('</div>', unsafe_allow_html=True)
+def gerar_analise_completa(df: pd.DataFrame, regime_destinatario: str) -> str:
+    """Gera análise fiscal + financeira com detalhamento de impacto CFOP"""
+    
+    df = enriquecer_regimes_emitentes(df)
+    destinatario_ie_isenta = "isent" in regime_destinatario.lower()
+    
+    metricas = calcular_metricas_financeiras(df)
+    por_fornecedor = analisar_por_fornecedor(df)
+    
+    # ✅ EXTRAIR NOME DO DESTINATÁRIO DINAMICAMENTE
+    nome_destinatario = "EMPRESA"
+    if "dest_nome" in df.columns and len(df) > 0:
+        dest_nome = df["dest_nome"].iloc[0]
+        if pd.notna(dest_nome) and str(dest_nome).strip():
+            nome_destinatario = str(dest_nome).upper()
+    
+    relatorio = f"""
+════════════════════════════════════════════════════════════════════════════════
+              📊 ANÁLISE EXECUTIVA - FISCAL + FINANCEIRA                        
+                                         
 
-        # Gráfico 3
-        st.markdown('<div class="grafico-container">', unsafe_allow_html=True)
-        st.subheader("🥧 Distribuição")
-        
-        if "emitente_nome" in df_result_ia.columns:
-            dist = df_result_ia.groupby("emitente_nome")["valor_total_num"].sum().reset_index()
-            dist.columns = ["Fornecedor", "Valor"]
-            
-            fig3 = px.pie(dist, values="Valor", names="Fornecedor")
-            fig3.update_layout(height=450)
-            st.plotly_chart(fig3, use_container_width=True)
-        
-        st.markdown('</div>', unsafe_allow_html=True)
+📌 DESTINATÁRIO: {nome_destinatario}
+Regime: {regime_destinatario}
+{'✅ IE ISENTA - Operações devem ser isentas (CFOP 5.949)' if destinatario_ie_isenta else '✅ IE ATIVA - Pode aproveitar créditos de ICMS'}
 
-        # Gráfico 4
-        st.markdown('<div class="grafico-container">', unsafe_allow_html=True)
-        st.subheader("📦 Quantidade de NFs")
-        
-        if "emitente_nome" in df_result_ia.columns:
-            qty = df_result_ia.groupby("emitente_nome").size().reset_index(name="Quantidade").sort_values("Quantidade", ascending=True)
-            qty.columns = ["Emitente", "Quantidade"]
-            
-            fig4 = px.bar(qty, x="Quantidade", y="Emitente", orientation="h", color_discrete_sequence=["#ff7f0e"])
-            fig4.update_layout(height=400, showlegend=False)
-            st.plotly_chart(fig4, use_container_width=True)
-        
-        st.markdown('</div>', unsafe_allow_html=True)
+════════════════════════════════════════════════════════════════════════════════
 
-        # ========================= ANÁLISE FISCAL =========================
-        st.divider()
-        st.subheader("📊 Análise Fiscal + Financeira")
-        
-        regime = st.selectbox("Regime tributário:", ["Simples Nacional", "Lucro Real", "Lucro Presumido", "Isento de IE"])
-        
-        if st.button("Gerar Análise Fiscal 📈", use_container_width=True):
-            if ANALISE_DISPONIVEL and gerar_analise_financeira_completa is not None:
-                with st.spinner("⏳ Gerando análise..."):
-                    analise = gerar_analise_financeira_completa(df_result_ia, regime)
-                    st.markdown("### 📊 Resultado:")
-                    st.text(analise)
-                    
-                    st.session_state['analise'] = analise
-                    st.session_state['regime'] = regime
-            else:
-                st.warning("Módulo de análise não disponível")
+💰 ANÁLISE FINANCEIRA
 
-        # ========================= PDF (NO FINAL) =========================
-        st.divider()
-        st.subheader("📄 Exportar Relatório em PDF")
-        
-        if 'analise' in st.session_state and PDF_DISPONIVEL:
-            if st.button("🔴 Gerar PDF", use_container_width=True):
-                with st.spinner("⏳ Gerando PDF..."):
-                    pdf_data = gerar_pdf_simples(df_result_ia, st.session_state['regime'], st.session_state['analise'])
-                    if pdf_data:
-                        st.download_button(
-                            label="📥 Baixar PDF",
-                            data=pdf_data,
-                            file_name=f"relatorio_{datetime.now():%Y%m%d_%H%M%S}.pdf",
-                            mime="application/pdf",
-                            use_container_width=True,
-                        )
-                        st.success("✅ PDF gerado!")
-        elif 'analise' not in st.session_state:
-            st.info("💡 Gere a análise acima primeiro")
-        elif not PDF_DISPONIVEL:
-            st.info("ℹ️ Instale reportlab: pip install reportlab")
+Total Agregado:           R$ {metricas['total']:>12,.2f}
+Quantidade de NFs:        {metricas['quantidade_nfs']:>12.0f}
+Valor Médio por NF:       R$ {metricas['media']:>12,.2f}
+Maior Compra:             R$ {metricas['maior']:>12,.2f}
+Menor Compra:             R$ {metricas['menor']:>12,.2f}
+Concentração Top 3:       {metricas['concentracao_top3']:>12.1f}%
 
+Interpretação:
+  • Total de compras: R$ {metricas['total']:,.2f}
+  • As 3 maiores compras representam {metricas['concentracao_top3']:.1f}% do total
+    {'(⚠️ Concentrada em poucos fornecedores)' if metricas['concentracao_top3'] > 70 else '(✅ Distribuída)'}
+
+════════════════════════════════════════════════════════════════════════════════
+
+🏢 ANÁLISE POR FORNECEDOR
+
+"""
+    
+    for count, (idx, row) in enumerate(por_fornecedor.iterrows(), 1):
+        regime_str = row["Regime"] if row["Regime"] != "Desconhecido" else "❌ DESCONHECIDO"
+        relatorio += f"""
+{count}. {row["Fornecedor"]}
+   CNPJ: {row["CNPJ"]}
+   • Total: R$ {row["Total"]:>12,.2f}
+   • NFs: {row["Quantidade"]:.0f} | Média: R$ {row["Média"]:,.2f}
+   • Regime: {regime_str}
+"""
+    
+    relatorio += f"""
+
+════════════════════════════════════════════════════════════════════════════════
+
+🎯 ANÁLISE FISCAL
+
+"""
+    
+    if destinatario_ie_isenta:
+        simples_count = (df["regime_emitente"] == "Simples Nacional").sum()
+        lucro_count = (df["regime_emitente"] == "Lucro Real/Presumido").sum()
+        desconhecido_count = (df["regime_emitente"] == "Desconhecido").sum()
+        
+        lucro_df = df[df["regime_emitente"] == "Lucro Real/Presumido"]
+        lucro_valor_total = lucro_df["valor_total_num"].sum()
+        
+        relatorio += f"""
+Sua empresa possui IE ISENTA
+
+CFOP Correto: 5.949 (Operação isenta)
+CFOP Incorreto: 5.102 (Operação tributada)
+
+Fornecedores por Regime:
+  • Simples Nacional: {simples_count} NF(s) - ✅ Sem ICMS destacado
+  • Lucro Real/Presumido: {lucro_count} NF(s) - ⚠️ ALTO RISCO SE CFOP INCORRETO
+  • Desconhecido: {desconhecido_count} NF(s) - ⚠️ Validar manualmente
+
+IMPACTO SE CFOP ESTIVER INCORRETO:
+  • NFs com Lucro Real: {lucro_count}
+  • Valor total em risco: R$ {lucro_valor_total:,.2f}
+"""
+        
+        # Calcular impacto
+        impacto = calcular_impacto_cfop_incorreto(df)
+        relatorio += gerar_relatorio_impacto_cfop(impacto)
+        
+        relatorio += f"""
+
+════════════════════════════════════════════════════════════════════════════════
+
+🚨 CONSEQUÊNCIAS FINANCEIRAS E TRIBUTÁRIAS
+
+SE CFOP ESTIVER INCORRETO (5.102 em vez de 5.949):
+
+1. IMPACTO FINANCEIRO DIRETO:
+   ❌ Custo adicional: R$ {impacto['imposto_total_indevido']:,.2f}
+   ❌ Seu custo final seria: R$ {impacto['valor_final_com_imposto']:,.2f}
+   
+2. IMPACTO TRIBUTÁRIO:
+   ❌ ICMS: R$ {impacto['icms_indevido_total']:,.2f} (não recuperável para IE isenta)
+   ❌ PIS: R$ {impacto['pis_indevido_total']:,.2f} (não recuperável)
+   ❌ COFINS: R$ {impacto['cofins_indevido_total']:,.2f} (não recuperável)
+   
+3. IMPACTO FISCAL/LEGAL:
+   ❌ Risco de auditoria fiscal (empresa isenta com ICMS)
+   ❌ Possível multa de 75% sobre ICMS indevido
+   ❌ Juros de mora
+   ❌ Possibilidade de bloqueio de créditos futuros
+
+4. IMPACTO CONTÁBIL:
+   ❌ Aumento de custos operacionais
+   ❌ Redução de lucratividade
+   ❌ Má interpretação de índices de gestão
+
+════════════════════════════════════════════════════════════════════════════════
+
+✅ AÇÕES RECOMENDADAS
+
+1. VALIDAÇÃO URGENTE:
+   ☐ Revisar todas as {lucro_count} NF(s) de Lucro Real/Presumido
+   ☐ Verificar CFOP em cada nota (deve ser 5.949)
+   ☐ Verificar se ICMS foi destacado (NÃO deve aparecer)
+   
+2. SE CFOP ESTIVER INCORRETO:
+   ☐ Contactar IMEDIATAMENTE o fornecedor
+   ☐ Solicitar emissão de Nota Fiscal Complementar (NFC-e) corrigida
+   ☐ Documentar toda a comunicação com o fornecedor
+   ☐ Guardar comprovante de recebimento
+   
+3. REGULARIZAÇÃO FISCAL:
+   ☐ Abrir chamado com contador para análise
+   ☐ Verificar se há ECF/DANFE com divergências
+   ☐ Se necessário, fazer ajuste no livro fiscal
+   
+4. PREVENÇÃO FUTURA:
+   ☐ Implementar validação de CFOP no recebimento
+   ☐ Treinar equipe sobre CFOPs corretos para IE isenta
+   ☐ Criar rotina mensal de auditoria fiscal
+
+════════════════════════════════════════════════════════════════════════════════
+
+📊 TOP 3 MAIORES COMPRAS (Maior Risco)
+
+"""
+    
     else:
-        st.warning("Nenhuma nota fiscal processada")
-else:
-    st.info("👆 Envie PDFs para começar")
+        simples_count = (df["regime_emitente"] == "Simples Nacional").sum()
+        lucro_count = (df["regime_emitente"] == "Lucro Real/Presumido").sum()
+        
+        relatorio += f"""
+Sua empresa tem IE ATIVA - Créditos disponíveis:
 
-# ========================= RODAPÉ =========================
-st.markdown("""
----
-<div style="text-align:center; color:gray; font-size:13px;">
-💼 Extrator de Notas Fiscais v2.4 – Desenvolvido por Ana Manuella Ribeiro e Letivan Filho<br>
-🚀 Com análise fiscal avançada e exportação em Excel/CSV/PDF
-</div>
-""", unsafe_allow_html=True)
+Fornecedores por Regime:
+  • Simples Nacional: {simples_count} NF(s) - ❌ Sem crédito de ICMS
+  • Lucro Real/Presumido: {lucro_count} NF(s) - ✅ Com crédito de ICMS
+
+ANÁLISE DE CRÉDITO:
+  • NFs com crédito: {lucro_count}
+  • Valor base para crédito: R$ {df[df['regime_emitente']=='Lucro Real/Presumido']['valor_total_num'].sum():,.2f}
+  • ICMS a recuperar (est. 18%): R$ {df[df['regime_emitente']=='Lucro Real/Presumido']['valor_total_num'].sum() * 0.18:,.2f}
+
+════════════════════════════════════════════════════════════════════════════════
+
+📊 TOP 3 MAIORES COMPRAS
+
+"""
+    
+    top3 = df.nlargest(3, "valor_total_num")
+    for count, (idx, row) in enumerate(top3.iterrows(), 1):
+        relatorio += f"""
+{count}. NF {row['numero_nf']}: R$ {row['valor_total_num']:,.2f}
+   Fornecedor: {row['emitente_nome']}
+   Regime: {row.get('regime_emitente', 'Desconhecido')}
+"""
+    
+    relatorio += f"""
+
+════════════════════════════════════════════════════════════════════════════════
+
+📅 Relatório gerado em: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}
+✅ Análise Completa com Detalhamento de Impacto CFOP
+"""
+    
+    return relatorio
