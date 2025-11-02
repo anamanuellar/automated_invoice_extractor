@@ -366,6 +366,82 @@ if uploaded_files:
             else:
                 st.warning("Módulo de análise não disponível")
 
+        # ========================= ANÁLISE COMPLETA COM IA =========================
+        st.divider()
+        st.subheader("🤖 Análise Completa com IA")
+
+        st.markdown("""
+        Gere insights automáticos sobre as notas fiscais, com foco em:
+        - **Padrões de fornecedores** e concentração de compras
+        - **Tendências de valores** e sazonalidade
+        - **Possíveis anomalias fiscais** e riscos
+        - **Recomendações** de otimização
+        """)
+
+        if st.button("Executar análise completa com IA 🚀", use_container_width=True):
+            st.info("🧠 Analisando dados via IA... (pode levar alguns segundos)")
+
+            try:
+                # Importar o ExtractorIA
+                from extrator_ia_itens_impostos import ExtractorIA
+                
+                # Tentar obter API key do session state ou variáveis de ambiente
+                api_key_ia = st.session_state.get('api_key_ia', '')
+                
+                if not api_key_ia:
+                    # Tentar ler de variáveis de ambiente
+                    api_key_ia = os.getenv('GOOGLE_API_KEY', '')
+                
+                if api_key_ia:
+                    with st.spinner("⏳ Processando com IA..."):
+                        model = ExtractorIA(api_key_ia)
+                        
+                        # Preparar dados para análise
+                        dados_resumo = f"""
+RESUMO DOS DADOS DE NOTAS FISCAIS:
+
+Total de NFs: {len(df_result_ia)}
+Valor Total: R$ {df_result_ia['valor_total_num'].sum():,.2f}
+Valor Médio: R$ {df_result_ia['valor_total_num'].mean():,.2f}
+
+PRINCIPAIS FORNECEDORES:
+"""
+                        top_fornecedores = df_result_ia.groupby("emitente_nome")["valor_total_num"].sum().nlargest(5)
+                        for i, (fornecedor, valor) in enumerate(top_fornecedores.items(), 1):
+                            dados_resumo += f"{i}. {fornecedor}: R$ {valor:,.2f}\n"
+                        
+                        dados_resumo += f"""
+
+AMOSTRA DOS DADOS:
+{df_result_ia.head(10).to_string(index=False)}
+
+Por favor, forneça uma análise executiva focando em:
+1. Padrões e tendências identificados
+2. Riscos fiscais potenciais
+3. Oportunidades de otimização
+4. Recomendações acionáveis
+"""
+                        
+                        # Chamar IA
+                        resultado = model.analisar_texto(dados_resumo)
+                        
+                        st.markdown("### 💡 Resultado da Análise com IA:")
+                        st.markdown(resultado)
+                        
+                        st.session_state['analise_ia'] = resultado
+                else:
+                    st.warning("""
+                    ⚠️ Chave de API não configurada.
+                    
+                    Para usar a análise com IA, configure sua API key:
+                    1. Defina a variável de ambiente `GOOGLE_API_KEY`
+                    2. Ou insira na barra lateral em Configurações
+                    """)
+            except ImportError:
+                st.warning("Módulo ExtractorIA não disponível. Verifique a instalação.")
+            except Exception as e:
+                st.error(f"Erro ao executar análise de IA: {e}")
+
         # ========================= PDF (NO FINAL) =========================
         st.divider()
         st.subheader("📄 Exportar Relatório em PDF")
