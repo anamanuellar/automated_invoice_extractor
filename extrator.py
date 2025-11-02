@@ -332,36 +332,22 @@ def extrair_nome_destinatario(texto: str) -> Optional[str]:
 
 
 def extrair_valor_total(texto: str) -> Optional[str]:
-    """
-    Extrai valor total com melhor robustez.
-    Busca pelos padrões mais comuns em DANFEs.
-    """
+    """Versão simplificada com múltiplos fallbacks"""
     
     if not texto:
         return None
     
-    # Tenta match principal
-    match = RE_VALOR_TOTAL.search(texto)
-    if match:
-        valor = match.group(1).strip()
-        if valor:
-            return valor
-    
-    # Fallback 1: Procura por linha contendo "VALOR TOTAL" + número
-    linhas = texto.split("\n")
-    for linha in linhas:
-        if "VALOR TOTAL" in linha.upper() or "TOTAL DA NOTA" in linha.upper():
-            # Extrai primeiro valor monetário da linha
-            valores = re.findall(r"(\d{1,3}(?:\.\d{3})*,\d{2})", linha)
+    # Procura por QUALQUER linha com "VALOR TOTAL"
+    for linha in texto.split('\n'):
+        if 'VALOR TOTAL DA NOTA' in linha.upper():
+            # Extrai último valor monetário dessa linha
+            valores = re.findall(r'(\d{1,3}(?:\.\d{3})*,\d{2})', linha)
             if valores:
-                return valores[-1]  # Pega o último (mais provavelmente o total)
+                return valores[-1]
     
-    # Fallback 2: Se nenhum padrão casou, pega último valor monetário do documento
-    valores = re.findall(r"(\d{1,3}(?:\.\d{3})*,\d{2})", texto)
-    if valores:
-        return valores[-1]
-    
-    return None
+    # Fallback: pega ÚLTIMO valor monetário do documento inteiro
+    todos_valores = re.findall(r'(\d{1,3}(?:\.\d{3})*,\d{2})', texto)
+    return todos_valores[-1] if todos_valores else None
 
 
 def extrair_dados_nf(
