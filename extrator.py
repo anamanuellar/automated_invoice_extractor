@@ -332,22 +332,22 @@ def extrair_nome_destinatario(texto: str) -> Optional[str]:
 
 
 def extrair_valor_total(texto: str) -> Optional[str]:
-    """Versão simplificada com múltiplos fallbacks"""
+    """Extrai VALOR TOTAL DA NOTA com precisão"""
     
     if not texto:
         return None
     
-    # Procura por QUALQUER linha com "VALOR TOTAL"
-    for linha in texto.split('\n'):
-        if 'VALOR TOTAL DA NOTA' in linha.upper():
-            # Extrai último valor monetário dessa linha
-            valores = re.findall(r'(\d{1,3}(?:\.\d{3})*,\d{2})', linha)
-            if valores:
-                return valores[-1]
+    # Busca pela linha exata: "VALOR TOTAL DA NOTA" seguida do valor
+    match = re.search(
+        r"VALOR\s+TOTAL\s+DA\s+NOTA\s+(\d{1,3}(?:\.\d{3})*,\d{2})",
+        texto,
+        re.IGNORECASE | re.MULTILINE
+    )
     
-    # Fallback: pega ÚLTIMO valor monetário do documento inteiro
-    todos_valores = re.findall(r'(\d{1,3}(?:\.\d{3})*,\d{2})', texto)
-    return todos_valores[-1] if todos_valores else None
+    if match:
+        return match.group(1).strip()
+    
+    return None
 
 
 def extrair_dados_nf(
