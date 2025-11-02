@@ -48,7 +48,7 @@ class ExtractorIA:
         if self.modelo_escolhido == "gemini" and GEMINI_DISPONIVEL and genai:
             try:
                 genai.configure(api_key=self.api_key)  # type: ignore
-                self.client = genai.GenerativeModel("gemini-1.5-flash")  # type: ignore
+                self.client = genai.GenerativeModel("gemini-2.5-flash")  # type: ignore
                 self.status = "✅ Gemini conectado"
             except Exception as e:
                 self.status = f"⚠️ Falha ao conectar Gemini: {e}"
